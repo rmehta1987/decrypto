@@ -8,10 +8,9 @@ verbose: false
 baseline_data_dir: embedding_models/
 exp_name: figure_4_tom_piaget
 piaget: true
-fixed_interceptor: qwen3_4b
+# fixed_interceptor: qwen3_4b
 # fixed_interceptor: llama3.1_8B
-# fixed_interceptor: llama3.1_70B
-# fixed_interceptor: llama3.1_70B  # eval target is the encoder so we fix the interceptor
+fixed_interceptor: llama3.1_70B  # eval target is the encoder so we fix the interceptor
 filter_model: ""
 match_encoder_decoder: true
 confirm_include_api_models: true
@@ -61,16 +60,52 @@ models:
     model_id: Qwen/Qwen3-4B
     # urls:
     #     - http://localhost:8000/v1
-    max_tokens: 1000
+    # max_tokens: 1000
+    max_tokens: 2500
+    # max_reasoning_tokens: 950  # cap <think> so the ANSWER block is always produced
+    max_reasoning_tokens: 2000
     temperature: 0.0
 
   - _target_: src.types.LocalModel
     model_key: qwen3_4b_hanabi
-    model_id: /net/projects2/ycleong/sg/strategy-rl/MARSHAL/results/hf_models/selfplay/hanabi_selfplay/checkpoint-19
+    model_id: /net/projects2/ycleong/sg/strategy-rl/MARSHAL/results/hf_models/selfplay/hanabi_selfplay/checkpoint-199
     # urls:
     #     - http://localhost:8000/v1
-    max_tokens: 1000
+    # max_tokens: 1000
+    max_tokens: 2500
+    # max_reasoning_tokens: 950
+    max_reasoning_tokens: 2000
     temperature: 0.0
+    
+  # - _target_: src.types.LocalModel
+  #   model_key: qwen3_4b_kuhn_poker
+  #   model_id: nics-efc/MARSHAL-Kuhn-Poker-Qwen3-4B
+  #   #     - http://localhost:8000/v1
+  #   max_tokens: 1000
+  #   temperature: 0.0
+
+  # - _target_: src.types.LocalModel
+  #   model_key: qwen3_4b_tic_tac_toe
+  #   model_id: nics-efc/MARSHAL-Tic-Tac-Toe-Qwen3-4B
+  #   #     - http://localhost:8000/v1
+  #   max_tokens: 1000
+  #   max_reasoning_tokens: 950  # cap <think> so the ANSWER block is always produced
+  #   temperature: 0.0
+
+  # - _target_: src.types.LocalModel
+  #   model_key: qwen3_8b
+  #   model_id: Qwen/Qwen3-8B
+  #   # urls:
+  #   #     - http://localhost:8000/v1
+  #   max_tokens: 1000
+  #   temperature: 0.0
+
+  # - _target_: src.types.LocalModel
+  #   model_key: qwen3_8b_generalist
+  #   model_id: nics-efc/MARSHAL-Generalist-Qwen3-8B
+  #   #     - http://localhost:8000/v1
+  #   max_tokens: 1000
+  #   temperature: 0.0  
     
   # - _target_: src.types.OpenAIModel
   #   model_key: o1

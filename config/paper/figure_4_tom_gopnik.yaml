@@ -34,13 +34,13 @@ models:
   #   num_retries: 100
   #   # provider_route: "azure/"
 
-  # - _target_: src.types.AnthropicModel
-  #   model_key: claude4.6
-  #   model_id: claude-sonnet-4-6
-  #   api_key_name: ANTHROPIC_API_KEY      # Anthropic key name, stored in .env file
-  #   temperature: 0.0
-  #   max_tokens: 4000
-  #   max_reasoning_tokens: 1024
+  - _target_: src.types.AnthropicModel
+    model_key: claude4.6
+    model_id: claude-sonnet-4-6
+    api_key_name: ANTHROPIC_API_KEY      # Anthropic key name, stored in .env file
+    temperature: 0.0
+    max_tokens: 4000
+    max_reasoning_tokens: 1024
   
   # - _target_: src.types.LocalModel
   #   model_key: llama3.1_70B
@@ -58,21 +58,63 @@ models:
   #   max_tokens: 1000
   #   temperature: 0.0
 
+  # - _target_: src.types.LocalModel
+  #   model_key: qwen3_4b
+  #   model_id: Qwen/Qwen3-4B
+  #   # urls:
+  #   #     - http://localhost:8000/v1
+  #   max_tokens: 2500
+  #   max_reasoning_tokens: 2000  # cap <think> so the ANSWER block is always produced
+  #   temperature: 0.0
+
+  # - _target_: src.types.LocalModel
+  #   model_key: qwen3_4b_hanabi
+  #   model_id: /net/projects2/ycleong/sg/strategy-rl/MARSHAL/results/hf_models/selfplay/hanabi_selfplay/checkpoint-199
+  #   # urls:
+  #   #     - http://localhost:8000/v1
+  #   max_tokens: 1000
+  #   max_reasoning_tokens: 950
+  #   temperature: 0.0
+  
+  # - _target_: src.types.LocalModel
+  #   model_key: qwen3_4b_kuhn_poker
+  #   model_id: nics-efc/MARSHAL-Kuhn-Poker-Qwen3-4B
+  #   #     - http://localhost:8000/v1
+  #   max_tokens: 2500
+  #   max_reasoning_tokens: 2000
+  #   temperature: 0.0
+
+  # - _target_: src.types.LocalModel
+  #   model_key: qwen3_4b_tic_tac_toe
+  #   model_id: nics-efc/MARSHAL-Tic-Tac-Toe-Qwen3-4B
+  #   #     - http://localhost:8000/v1
+  #   max_tokens: 2500
+  #   max_reasoning_tokens: 2000  # cap <think> so the ANSWER block is always produced
+  #   temperature: 0.0
+  
   - _target_: src.types.LocalModel
-    model_key: qwen3_4b
-    model_id: Qwen/Qwen3-4B
+    model_key: qwen3_8b
+    model_id: Qwen/Qwen3-8B
     # urls:
     #     - http://localhost:8000/v1
-    max_tokens: 1000
+    max_tokens: 2500
+    max_reasoning_tokens: 2000
     temperature: 0.0
 
   - _target_: src.types.LocalModel
-    model_key: qwen3_4b_hanabi
-    model_id: /net/projects2/ycleong/sg/strategy-rl/MARSHAL/results/hf_models/selfplay/hanabi_selfplay/checkpoint-19
-    # urls:
+    model_key: qwen3_8b_generalist
+    model_id: nics-efc/MARSHAL-Generalist-Qwen3-8B
     #     - http://localhost:8000/v1
-    max_tokens: 1000
-    temperature: 0.0
+    max_tokens: 2500
+    max_reasoning_tokens: 2000
+    temperature: 0.0  
+  
+  # - _target_: src.types.LocalModel
+  #   model_key: qwen3_8b_generalist
+  #   model_id: nics-efc/MARSHAL-Generalist-Qwen3-8B
+  #   #     - http://localhost:8000/v1
+  #   max_tokens: 1000
+  #   temperature: 0.0  
 
   # - _target_: src.types.OpenAIModel
   #   model_key: o1

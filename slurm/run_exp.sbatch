@@ -10,6 +10,9 @@
 
 cd /net/projects2/ycleong/sg/strategy-rl/decrypto
 
+source /net/projects2/ycleong/sg/miniconda3/etc/profile.d/conda.sh
+conda activate decrypto
+
 # 1. Wait for the model weights to load into VRAM (takes ~1-3 mins)
 EXPECTED_MODELS=${EXPECTED_MODELS:-0}
 # EXPECTED_MODELS=2

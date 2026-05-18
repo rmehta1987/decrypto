@@ -304,14 +304,62 @@ class RoleClient:
                     content = response.choices[0].message.content
 
                 else:  # vLLM models
-                    response = self.client.chat.completions.create(
-                        model=self.model_id,
-                        messages=messages,
-                        max_tokens=self.max_tokens,
-                        temperature=self.temperature,
-                        seed=self.seed,
-                    )
-                    content = response.choices[0].message.content
+                    if self.max_reasoning_tokens > 0:
+                        # Two-stage thinking-budget pattern for Qwen3-style
+                        # reasoning models served via vLLM (which does not yet
+                        # support thinking_budget natively, see vllm#17887).
+                        #
+                        # Stage 1: let the model think up to the budget, stopping
+                        # when it emits </think> on its own.
+                        stage1 = self.client.chat.completions.create(
+                            model=self.model_id,
+                            messages=messages,
+                            max_tokens=self.max_reasoning_tokens,
+                            temperature=self.temperature,
+                            seed=self.seed,
+                            stop=["</think>"],
+                        )
+                        thinking_content = stage1.choices[0].message.content or ""
+                        # Some servers echo the opening <think> tag; strip it so
+                        # we can re-wrap cleanly below.
+                        thinking_content = thinking_content.lstrip()
+                        if thinking_content.startswith("<think>"):
+                            thinking_content = thinking_content[len("<think>"):]
+                        thinking_content = thinking_content.strip("\n")
+
+                        # Stage 2: prefill the assistant turn with the (possibly
+                        # truncated) reasoning, force-closed with </think>, and
+                        # ask the model to continue with the remaining budget.
+                        # This guarantees the model is in "answer mode" and must
+                        # produce the ANSWER: block.
+                        answer_budget = max(
+                            self.max_tokens - self.max_reasoning_tokens, 64
+                        )
+                        prefill = f"<think>\n{thinking_content}\n</think>\n\n"
+                        messages_with_prefill = messages + [
+                            {"role": "assistant", "content": prefill}
+                        ]
+                        stage2 = self.client.chat.completions.create(
+                            model=self.model_id,
+                            messages=messages_with_prefill,
+                            max_tokens=answer_budget,
+                            temperature=self.temperature,
+                            seed=self.seed,
+                            extra_body={
+                                "continue_final_message": True,
+                                "add_generation_prompt": False,
+                            },
+                        )
+                        content = prefill + (stage2.choices[0].message.content or "")
+                    else:
+                        response = self.client.chat.completions.create(
+                            model=self.model_id,
+                            messages=messages,
+                            max_tokens=self.max_tokens,
+                            temperature=self.temperature,
+                            seed=self.seed,
+                        )
+                        content = response.choices[0].message.content
                 
                 # If successful, break the retry loop
                 break

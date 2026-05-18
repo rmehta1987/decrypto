@@ -34,6 +34,18 @@ class LocalModel:
     max_tokens: int = field(
         default=750, metadata={"help": "Maximum number of tokens for model outputs"}
     )
+    max_reasoning_tokens: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Budget for the <think> block on thinking-capable local models "
+                "(e.g. Qwen3). 0 disables the budget. When > 0, generation is "
+                "split into a thinking call (capped at this budget, stop=</think>) "
+                "followed by an answer call that prefills </think> to guarantee "
+                "an ANSWER. Must be < max_tokens."
+            )
+        },
+    )
     temperature: float = field(
         default=0.6, metadata={"help": "Temperature for model outputs"}
     )

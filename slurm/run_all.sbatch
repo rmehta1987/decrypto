@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=decrypto
+#SBATCH --job-name=bench
 # SBATCH --nodes=2
 # SBATCH --gpus-per-node=1
 #SBATCH --time=12:00:00
@@ -26,11 +26,19 @@ set -euo pipefail
 # ──────────────────────────────────────────────────────────────────────
 
 # Format: "model_key:hf_or_local_path:num_gpus"
-CKPT_STEP=19  # don't forget to update ckpt step in yaml config files as well!
+TRAIN_PROTOCOL="generalist"
+# TRAIN_PROTOCOL="tic_tac_toe"
+# TRAIN_PROTOCOL="kuhn_poker"
+# TRAIN_PROTOCOL="hanabi"
+CKPT_STEP=199  # don't forget to update ckpt step in yaml config files as well!
 models=(
-    # "llama3.1_70B:meta-llama/Meta-Llama-3.1-70B-Instruct:4"
-    "qwen3_4b:Qwen/Qwen3-4B:1"
-    "qwen3_4b_hanabi:/net/projects2/ycleong/sg/strategy-rl/MARSHAL/results/hf_models/selfplay/hanabi_selfplay/checkpoint-${CKPT_STEP}:1"
+    "llama3.1_70B:meta-llama/Meta-Llama-3.1-70B-Instruct:4"
+    # "qwen3_4b:Qwen/Qwen3-4B:1"
+    # "qwen3_4b_kuhn_poker:nics-efc/MARSHAL-Kuhn-Poker-Qwen3-4B:1"
+    # "qwen3_4b_tic_tac_toe:nics-efc/MARSHAL-Tic-Tac-Toe-Qwen3-4B:1"
+    # "qwen3_4b_hanabi:/net/projects2/ycleong/sg/strategy-rl/MARSHAL/results/hf_models/selfplay/hanabi_selfplay/checkpoint-${CKPT_STEP}:1"
+    "qwen3_8b:Qwen/Qwen3-8B:2"
+    "qwen3_8b_generalist:nics-efc/MARSHAL-Generalist-Qwen3-8B:2"
 )
 
 # How many GPUs each node has on your cluster (e.g. 4 for 4×A100, 8 for 8×H100).
@@ -46,13 +54,14 @@ CPUS_PER_EXP=8
 # Hydra config names to run sequentially (under config/paper/)
 EXPERIMENT_CONFIGS=(
     # "figure_4_tom_piaget_test"
-    "figure_4_tom_piaget"
-    # "figure_4_tom_gopnik"
+    # "figure_4_tom_piaget"
+    "figure_4_tom_gopnik"
 )
 
 # EXP_NAME_SUFFIX="" # default
-# EXP_NAME_SUFFIX="_qwen3_4b_${CKPT_STEP}"
-EXP_NAME_SUFFIX="_qwen3_4b_${CKPT_STEP}_only"
+# EXP_NAME_SUFFIX="_qwen3_8b_generalist_${CKPT_STEP}"
+EXP_NAME_SUFFIX="_qwen3_4b_${TRAIN_PROTOCOL}_${CKPT_STEP}_think2000"
+# EXP_NAME_SUFFIX="_qwen3_4b_${TRAIN_PROTOCOL}_${CKPT_STEP}_only"
 
 # ──────────────────────────────────────────────────────────────────────
 # 2. Self-submitting wrapper — runs when executed outside SLURM
@@ -101,6 +110,10 @@ fi
 # ──────────────────────────────────────────────────────────────────────
 # 3. Inside SLURM — launch vLLM servers and run experiments
 # ──────────────────────────────────────────────────────────────────────
+
+# Activate the conda environment
+source /net/projects2/ycleong/sg/miniconda3/etc/profile.d/conda.sh
+conda activate decrypto
 
 cd /net/projects2/ycleong/sg/strategy-rl/decrypto
 
