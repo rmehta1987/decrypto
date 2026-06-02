@@ -1,0 +1,26 @@
+defaults:
+  - override hydra/job_logging: disabled
+
+_target_: src.types.ExperimentConfig
+num_episodes: 1
+env_seed: [0]
+verbose: true
+baseline_data_dir: embedding_models/
+exp_name: midway_smoke
+
+# One model plays encoder/decoder/interceptor — minimum viable end-to-end
+# to confirm the full pipeline runs on Midway. No baselines needed.
+match_encoder_decoder: true
+fixed_interceptor: llama3.1_70B
+filter_model: ""
+no_error_history: true
+
+# Filled in at runtime by get_models_from_slurm=true (set via run_exp_midway.sbatch).
+# `model_key` here must match the slurm job name prefix and the agent_paths
+# entry in src/utils/server.py.
+models:
+  - _target_: src.types.LocalModel
+    model_key: llama3.1_70B
+    model_id: /project/rcc/mehta5/vllm/models/Meta-Llama-3.1-70B-Instruct
+    max_tokens: 1000
+    temperature: 0.0

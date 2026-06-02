@@ -13,12 +13,14 @@ import subprocess
 agent_paths = {
     "llama3.2_1B": "meta-llama/Llama-3.2-1B-Instruct",
     "llama3.1_8B": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-    "llama3.1_70B": "meta-llama/Meta-Llama-3.1-70B-Instruct",
+    "llama3.1_70B": "/project/rcc/mehta5/vllm/models/Meta-Llama-3.1-70B-Instruct",
     "deepseek_r1_32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",  # DeepSeek R1 Distilled
     "qwen2_1.5B": "Qwen/Qwen2-1.5B",
     "qwen3_4b": "Qwen/Qwen3-4B",
     "qwen3_8b": "Qwen/Qwen3-8B",
     # "qwen3_4b_hanabi": "/net/projects2/ycleong/sg/strategy-rl/MARSHAL/results/hf_models/selfplay/hanabi_selfplay",
+    "qwen2.5_0.5B": "/project/rcc/mehta5/vllm/models/Qwen2.5-0.5B-Instruct",
+    "qwen2.5_72B": "/project/rcc/mehta5/vllm/models/Qwen2.5-72B-Instruct",
 }
 
 
