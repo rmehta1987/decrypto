@@ -1,189 +1,222 @@
-# Midway port — running notes
+# Running Decrypto on RCC Midway
 
-Living doc. Tracks hardware facts about RCC Midway and the analysis/changes
-needed to make the inherited Decrypto slurm scripts (written for the CMU
-`ycleong` cluster) run here.
+This is a living document. It explains how to stand up and run the Decrypto
+experiments on the University of Chicago RCC **Midway** cluster, and it records
+the changes that were needed to make the inherited slurm scripts (originally
+written for the CMU `ycleong` cluster) work here.
+
+If you just want to run a smoke test, jump to
+[Running a smoke test](#running-a-smoke-test). If something breaks, the
+[Decisions / changes log](#decisions--changes-log) at the bottom captures the
+problems we already hit and how we fixed them.
 
 ---
 
 ## Cluster facts (Midway / RCC)
 
+These are the hardware and environment facts the scripts depend on.
+
 | Item | Value |
 |---|---|
 | Account | `rcc-staff` |
 | Partition available to us | `test` only |
-| GPU we are targeting | NVIDIA H200 (constraint `H200`) |
+| GPU we target | NVIDIA H200 (constraint `H200`) |
 | GPU VRAM observed | ~140 GiB free on the H200 (probe log 50177021) |
 | Driver | 535.216.03 (max CUDA 12.2 advertised) |
-| Toolchain bundled in env | torch 2.8.0+cu128, vllm 0.10.2 — works via CUDA Minor-Version Compatibility |
+| Toolchain in the env | torch 2.8.0+cu128, vllm 0.10.2 — works via CUDA Minor-Version Compatibility |
 | Python module | `python/miniforge-25.3.0` |
-| Activation pattern | `eval "$(mamba shell hook --shell bash)" && mamba activate <env>` (NOT `source activate`) |
+| Conda env | `/project/rcc/mehta5/conda-envs/vllm-probe` |
 | Project root | `/project/rcc/mehta5/decrypto` |
-| vllm-probe conda env | `/project/rcc/mehta5/conda-envs/vllm-probe` |
-| Model cache | `/project/rcc/mehta5/vllm/models/` (Qwen2.5-0.5B-Instruct already present) |
+| Model cache | `/project/rcc/mehta5/vllm/models/` |
 
-Resource decision for confirming Midway works:
-- **1 node × 4 H200** is the target allocation. Plenty for every smoke-test
-  path (small served model + baseline; two small models side-by-side; or a
-  70B at TP=4 if we later want to stretch it). Open questions about partition
-  caps and multi-node serving are deferred — not needed to prove the cluster
-  works.
+For confirming the cluster works, we use **1 node × 4 H200**. That is enough for
+every smoke-test path: a small served model with a baseline opponent, two small
+models side by side, or a 70B model at tensor-parallel 4. Questions about
+partition caps and multi-node serving are deferred — we don't need them to prove
+the pipeline runs.
 
 ---
 
-## Env state (vllm-probe) — verified 2026-05-27
+## One-time setup
 
-```
-python       3.12.13
-torch        2.8.0+cu128
-vllm         0.10.2
-transformers 4.x  (pinned <5 — 5.x removes `all_special_tokens_extended`)
-tokenizers   <0.22
-+ runner deps: dotenv, nltk, gensim, scipy, pandas, tqdm, anthropic,
-               openai, requests, hydra-core, litellm
-```
+You only need to do this once per machine/account.
 
-Probe `slurm/probe_vllm_013.sbatch` passes Stages 0–3 (nvidia-smi, torch matmul,
-vLLM load + generate on Qwen2.5-0.5B). Log: `logs/vllm013-probe-50177021.log`.
+1. **Activate the environment** every time you open a new shell. Use the mamba
+   pattern below — do **not** use `source activate`, which falls through to the
+   system anaconda 3.8 on the login nodes and will not have the right packages:
 
-Note: do NOT run `pip install -r requirements.txt` against this env —
-`requirements.txt` pins `torch==2.9.0` / `vllm==0.13.0` which are incompatible
-with the cluster's NVIDIA 535 driver. We satisfy the runner-side deps
-individually.
+   ```bash
+   module load python/miniforge-25.3.0
+   eval "$(mamba shell hook --shell bash)"
+   mamba activate /project/rcc/mehta5/conda-envs/vllm-probe
+   ```
 
----
+2. **Trust the existing package versions.** The `vllm-probe` env already has a
+   working stack: torch 2.8.0+cu128, vllm 0.10.2, transformers (pinned `<5`),
+   and tokenizers (pinned `<0.22`). Do **not** run
+   `pip install -r requirements.txt` — that file pins `torch==2.9.0` and
+   `vllm==0.13.0`, which are incompatible with the cluster's NVIDIA 535 driver
+   and will break the env.
 
-## Inherited script audit — what needs changing
+3. **If you ever need to recreate the runner-side dependencies** (the experiment
+   side talks to vLLM over HTTP and does not import torch/vllm), install just
+   these into the env:
 
-The repo's slurm scripts target the CMU `ycleong` cluster and need surgical
-edits before they will run here.
+   ```bash
+   pip install dotenv nltk gensim scipy pandas tqdm anthropic openai requests hydra-core litellm
+   ```
 
-### `slurm/launch_servers.sh`
-- [ ] `--partition=general` → `--partition=test`
-- [ ] Add `--account=rcc-staff`
-- [ ] `--constraint="a100|h100"` → `--constraint=H200`
-- [ ] Logs path: `/net/projects2/ycleong/sg/strategy-rl/decrypto/logs/vllm/...`
-      → `/project/rcc/mehta5/decrypto/logs/vllm/...` (and `mkdir -p`)
-- [ ] `HF_HOME` / `HUGGINGFACE_HUB_CACHE` paths point at the CMU NFS — repoint
-      to a project-local dir (e.g. `/project/rcc/mehta5/hf_cache`)
-- [ ] `--wrap "vllm serve ..."` runs in whatever env the submitting shell has;
-      needs to first `module load python/miniforge-25.3.0 && mamba activate
-      /project/rcc/mehta5/conda-envs/vllm-probe` inside the wrap
-- [ ] Models list currently has 70B + Qwen3-4B + a `/net/projects2/...` local
-      checkpoint that doesn't exist here. Start with a single small model
-      (Qwen2.5-0.5B already validated) for the first end-to-end.
-- [ ] `--time=12:00:00` likely exceeds `test`-partition cap — confirm and lower
+4. **Download any model you plan to serve** into the model cache. For example:
 
-### `slurm/run_exp.sbatch`
-- [ ] Same partition / account / time / log-path fixes
-- [ ] `cd /net/projects2/ycleong/sg/strategy-rl/decrypto` → `cd /project/rcc/mehta5/decrypto`
-- [ ] Conda activation: replace
-      `source /net/projects2/ycleong/sg/miniconda3/etc/profile.d/conda.sh && conda activate decrypto`
-      with the mamba pattern + our env path
-- [ ] Config referenced (`figure_4_tom_piaget`) requires `qwen3_4b` and a
-      `qwen3_4b_hanabi` local checkpoint not present here — use/author a smaller
-      config for first run (single small served model + a baseline)
+   ```bash
+   huggingface-cli download Qwen/Qwen2.5-72B-Instruct \
+     --local-dir /project/rcc/mehta5/vllm/models/Qwen2.5-72B-Instruct
+   ```
 
-### `slurm/run_all.sbatch` (newer all-in-one)
-Same fixes as above plus its `NODE_GPU_CAPACITY=8` assumption needs revisiting
-once we know what nodes the `test` partition actually grants.
+   The model's `model_key` must already exist in `agent_paths` in
+   `src/utils/server.py`, pointing at this local path. The keys validated so far
+   are `qwen2.5_0.5B`, `qwen2.5_72B`, and `llama3.1_70B`.
 
 ---
 
-## Plan to first green end-to-end run on Midway
+## Running a smoke test
 
-Allocation: 1 node × 4 H200, `--partition=test --account=rcc-staff`.
+The launcher does almost everything for you: it submits the vLLM server job(s)
+and then submits the experiment job as a *dependent* job that waits for the
+servers, runs the games, writes results, and cancels the servers to free the
+GPU. You normally only run a single command.
 
-1. **Smoke test (uses 1 of 4 GPUs).** Serve one `Qwen2.5-0.5B-Instruct`
-   (already on disk, validated by probe); experiment side uses a
-   `BaselineModel` (GloVe) opponent. Proves the orchestration path:
-   `launch → server up → ping_servers OK → run.py reads slurm queue → 1
-   episode completes → output file written`.
-2. **Two-model test (uses 2 of 4 GPUs).** Serve Qwen3-4B as encoder/decoder
-   (match_encoder_decoder) + Qwen3-4B as fixed interceptor. Mirrors the
-   shape of `figure_4_tom_piaget_test` without needing the missing
-   `qwen3_4b_hanabi` checkpoint.
-3. After (1) and (2) pass on the same allocation → Midway is confirmed; defer
-   the partition wall-time / multi-node questions until we actually need
-   bigger runs.
+1. **Pick the model to serve.** Open `slurm/launch_servers_midway.sh` and edit
+   the `models` and `ngpus` arrays near the top. Each entry is
+   `"model_key:model_path"`, and `ngpus` is the tensor-parallel size (one entry
+   per model):
 
-Concretely, work items:
-- Author `slurm/launch_servers_midway.sh` and `slurm/run_exp_midway.sbatch`
-  (Midway-flavored copies; keep originals for diff visibility).
-- Author `config/examples/local_midway.yaml` (smoke test) and a small
-  `config/paper/figure_4_tom_piaget_midway.yaml` (two-model test).
-- Make sure `logs/vllm/` and `logs/paper/` directories exist before submit.
+   ```bash
+   models=( "llama3.1_70B:/project/rcc/mehta5/vllm/models/Meta-Llama-3.1-70B-Instruct" )
+   ngpus=(4)   # 70B at bf16 ~140 GB → spread across the whole 4× H200 node
+   ```
+
+2. **Point the experiment config at the same model.** In
+   `config/examples/local_midway.yaml`, make sure `fixed_interceptor`,
+   `models[].model_key`, and `models[].model_id` all refer to the model you just
+   chose. The `model_key` must match the slurm job-name prefix and the
+   `agent_paths` entry in `src/utils/server.py`.
+
+3. **Submit the launcher** from the project root:
+
+   ```bash
+   cd /project/rcc/mehta5/decrypto
+   bash slurm/launch_servers_midway.sh
+   ```
+
+   This prints the server job ID(s) and the port each model is served on, then
+   submits the dependent experiment job.
+
+4. **Watch the server come up.** Tail its log until you see
+   `Application startup complete`:
+
+   ```bash
+   tail -f logs/vllm/<model_key>-<jid>.out
+   ```
+
+5. **Let the experiment job run.** Once the server is up, the experiment job
+   polls `python -m slurm.ping_servers` until it gets a healthy reply, then runs
+   `run.py` with `config-name=local_midway` and `get_models_from_slurm=true` (so
+   it discovers the server from the slurm queue). Watch its log here:
+
+   ```bash
+   tail -f logs/paper/midway_smoke_<jid>.out
+   ```
+
+6. **Collect the results.** When the run finishes it writes
+   `results/midway_smoke/experiment_summary.csv` and automatically `scancel`s the
+   server job to release the GPU. A smoke test is one episode and finishes in
+   roughly a minute once the model is loaded.
+
+---
+
+## What changed from the inherited scripts
+
+The original scripts targeted the CMU `ycleong` cluster. Rather than edit them in
+place, we wrote Midway-flavored copies (`*_midway.*`) and kept the originals for
+easy diffing. The substantive changes were:
+
+- **Scheduler settings.** `--partition=general` → `--partition=test`, added
+  `--account=rcc-staff`, and `--constraint="a100|h100"` → `--constraint=H200`.
+  We also lowered the wall time to `02:00:00` to fit the `test` partition.
+- **Paths.** All CMU NFS paths (`/net/projects2/ycleong/...`) were repointed to
+  Midway project storage under `/project/rcc/mehta5/...`, including the repo
+  root, log directories, the Hugging Face cache, and the torch-inductor cache.
+- **Environment activation.** The CMU conda activation was replaced with the
+  mamba pattern, and the `vllm serve` command is wrapped so it loads the module
+  and activates the env *inside* the slurm job.
+- **Models.** The original model list referenced a 70B model plus local
+  checkpoints that don't exist here. We started with a single small validated
+  model and grew from there.
+- **`src/utils/server.py`.** Added `agent_paths` entries (`qwen2.5_0.5B`,
+  `qwen2.5_72B`, local `llama3.1_70B`) so the squeue-based server discovery can
+  resolve a job name to a local model path.
+
+---
+
+## Results so far
+
+All three models and both tensor-parallel configs have been confirmed
+end-to-end on Midway:
+
+- **Qwen2.5-0.5B** (1× H200) — pipeline runs, but the model is too small to play
+  well (it fails the JSON-format retries, so gameplay is garbage). This is a
+  model-capacity issue, not a pipeline issue, and is expected at this scale.
+- **Qwen2.5-72B** (TP=2, 2× H200) — plays competent Decrypto with zero
+  JSON-format failures: plausible one-word hints, correct decoding, intelligent
+  intercepts.
+- **Llama-3.1-70B** (TP=4, whole node) — plays at the same level as Qwen2.5-72B,
+  zero JSON-format failures.
+
+The takeaway: the orchestration path (launch → server up → `ping_servers` OK →
+`run.py` discovers the server → episode completes → results written → GPU freed)
+works, and real runs just need a sufficiently large model.
 
 ---
 
 ## Decisions / changes log
 
-- 2026-05-27 — Capped transformers to `<5` to fix `all_special_tokens_extended`
-  AttributeError; tokenizers capped to `<0.22` to match. Probe now passes.
-- 2026-05-27 — Standardized on mamba activation; `source activate` falls
-  through to system anaconda 3.8 on login nodes.
-- 2026-05-27 — Smoke test v1 (server jid 50177252, exp jid 50177253): vLLM
-  server came up cleanly and `ping_servers` got a 200 OK; the experiment job
-  died at `import hydra`. The `vllm-probe` env only had the vLLM stack — none
-  of Decrypto's runner deps. Cannot just `pip install -r requirements.txt`
-  because that file pins `torch==2.9.0` and `vllm==0.13.0` (incompatible with
-  driver 535 / what works here). Installed only the runner-side deps into
-  `vllm-probe`:
-  ```
-  pip install dotenv nltk gensim scipy pandas tqdm anthropic openai requests hydra-core litellm
-  ```
-  Single env (`vllm-probe`) now hosts both the server and the runner, which is
-  fine because the runner is HTTP-only and doesn't touch torch/vllm at import
-  time.
-- 2026-05-27 — Added `qwen2.5_0.5B` entry to `src/utils/server.py:agent_paths`
-  so squeue-based discovery resolves the job name to the local model path.
-- 2026-05-27 — Smoke test v2 (server jid 50177369): vLLM crashed during
-  `torch.compile` autotune cache save with `PermissionError: ... /scratch/local/jobs/50177252`.
-  Root cause: `--export=ALL` propagated a stale `TMPDIR` from the submitting
-  shell (pointing at the prior cancelled job's SLURM scratch) into the new
-  job. Fixes applied to `launch_servers_midway.sh` (and mirrored in
-  `run_exp_midway.sbatch`):
-  1. `unset TMPDIR SLURM_TMPDIR` then re-set `TMPDIR=/tmp/${USER}_${SLURM_JOB_ID}`
-     inside the wrap.
-  2. Set `TORCHINDUCTOR_CACHE_DIR=/project/rcc/mehta5/torchinductor_cache`
-     so the inductor cache lives in project storage, not transient SLURM scratch.
-  3. Added `--enforce-eager` to the vLLM serve flags — skips torch.compile
-     altogether for the smoke test (mirrors what the working probe used).
-     Will revisit once the smoke test is green and we want full perf.
-- **2026-05-27 — SMOKE TEST GREEN (server jid 50177648, exp jid 50177649).**
-  Server reached "Application startup complete" on `midway3-0606`, `ping_servers`
-  got a 200 OK, `run.py` ran one episode of Qwen2.5-0.5B vs itself, produced
-  `results/midway_smoke/experiment_summary.csv`, and the cleanup `scancel`
-  released the GPU. Total exp wallclock: 6 sec. End-to-end Decrypto on Midway
-  is confirmed working.
-
-  (Sidebar: the 0.5B model failed every JSON-format retry, so gameplay was
-  garbage — that's a model-capacity issue, not a pipeline issue, and is
-  expected at this scale. Real runs need a bigger model.)
-
-- 2026-05-27 — Smoke v2 retarget: Llama-3.1-70B access request is pending
-  Meta review, so switching to **Qwen2.5-72B-Instruct** (not gated, same
-  scale). Pre-download via
-  `huggingface-cli download Qwen/Qwen2.5-72B-Instruct --local-dir /project/rcc/mehta5/vllm/models/Qwen2.5-72B-Instruct`.
-  Scripts updated: `agent_paths` adds `qwen2.5_72B → local path`; launcher
-  now requests TP=2 / `--gres=gpu:2` / `--mem=128G` / `--time=02:00:00`;
-  config uses `max_tokens: 1000`. Plan once Meta approves Llama: load it on
-  the full node (TP=4 across all 4 H200s on one node) — will wait longer
-  for the resources but only need a single H200-node allocation.
-
-- **2026-05-27 — QWEN2.5-72B SMOKE TEST GREEN (server jid 50180980, exp jid 50180981).**
-  TP=2 across 2× H200, `--enforce-eager`. Server loaded weights and reached
-  "Application startup complete"; experiment ran 1 episode (4 turns, ~67s).
-  Results: 0 miscommunications, 1 intercept (Eve cracked turn 3 and 4),
-  Eve wins. Zero JSON-format failures — massive improvement over the 0.5B
-  run. The 72B model plays competent Decrypto: generates plausible one-word
-  hints, decodes correctly, and intercepts intelligently.
-  Results: `results/midway_smoke/experiment_summary.csv`.
-
-- **2026-05-27 — LLAMA-3.1-70B SMOKE TEST GREEN (server jid 50185192, exp jid 50185193).**
-  TP=4 across 4× H200 (whole node), `--enforce-eager`. Experiment ran 1
-  episode (3 turns, ~61s). Results: 0 miscommunications, 1 intercept
-  (Eve cracked turns 2 and 3), Eve wins. Zero JSON-format failures.
-  Llama plays competently at the same level as Qwen2.5-72B.
-  All three models (0.5B, 72B, 70B) and both TP configs (TP=2, TP=4)
-  now proven on Midway end-to-end.
+- **2026-05-27 — Pinned transformers `<5` and tokenizers `<0.22`.** Fixes the
+  `all_special_tokens_extended` AttributeError; the probe passes afterward.
+- **2026-05-27 — Standardized on mamba activation.** `source activate` falls
+  through to the system anaconda 3.8 on login nodes.
+- **2026-05-27 — Smoke test v1 (server 50177252, exp 50177253).** The vLLM
+  server came up and `ping_servers` got a 200 OK, but the experiment job died at
+  `import hydra`: the env only had the vLLM stack, none of Decrypto's runner
+  deps. Installed the runner deps individually (see step 3 of setup) rather than
+  using `requirements.txt`, which pins incompatible torch/vllm. A single env now
+  hosts both server and runner, which is fine because the runner is HTTP-only and
+  never imports torch/vllm.
+- **2026-05-27 — Smoke test v2 (server 50177369).** vLLM crashed during the
+  `torch.compile` autotune cache save with a `PermissionError` writing to a
+  `/scratch/local/jobs/...` path. Root cause: `--export=ALL` propagated a stale
+  `TMPDIR` from the submitting shell (pointing at a previous, cancelled job's
+  scratch). Fixes, applied to both Midway scripts:
+  1. `unset TMPDIR SLURM_TMPDIR`, then set `TMPDIR=/tmp/${USER}_${SLURM_JOB_ID}`
+     inside the job.
+  2. Set `TORCHINDUCTOR_CACHE_DIR` to project storage so the inductor cache
+     survives outside transient scratch.
+  3. Added `--enforce-eager` to skip `torch.compile` for the smoke test (mirrors
+     the working probe). Revisit once we want full performance.
+- **2026-05-27 — Smoke test GREEN (server 50177648, exp 50177649).** Qwen2.5-0.5B
+  ran one episode end-to-end and wrote `results/midway_smoke/experiment_summary.csv`;
+  cleanup `scancel` released the GPU. Gameplay was garbage (0.5B fails the JSON
+  retries) — a model-capacity issue, not a pipeline one.
+- **2026-05-27 — Retargeted the second smoke test to Qwen2.5-72B.** The
+  Llama-3.1-70B access request was pending Meta review, so we used the
+  ungated, same-scale Qwen2.5-72B. Pre-downloaded it, added `qwen2.5_72B` to
+  `agent_paths`, and set the launcher to TP=2 / `--gres=gpu:2` / `--mem=128G`.
+- **2026-05-27 — Qwen2.5-72B smoke test GREEN (server 50180980, exp 50180981).**
+  TP=2 across 2× H200, `--enforce-eager`. One episode (4 turns, ~67s): zero
+  JSON-format failures, Eve cracked turns 3 and 4 and won. The 72B model plays
+  competent Decrypto.
+- **2026-05-27 — Llama-3.1-70B smoke test GREEN (server 50185192, exp 50185193).**
+  TP=4 across the whole 4× H200 node, `--enforce-eager`. One episode (3 turns,
+  ~61s): zero JSON-format failures, Eve cracked turns 2 and 3 and won. Plays at
+  the same level as Qwen2.5-72B. With this, all three models and both TP configs
+  are proven on Midway.
