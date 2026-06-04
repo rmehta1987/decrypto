@@ -82,7 +82,16 @@ def initialize_client(model):
                 client = OpenAI(api_key=api_key)
     elif isinstance(model, LocalModel):
         url = sample(model.urls, k=1)[0]
-        client = OpenAI(api_key="dummy_key", base_url=url)
+        if getattr(model, "use_globus_auth", False):
+            # ALCF inference gateway (Sophia/Polaris): the OpenAI-compatible
+            # endpoint expects a live Globus access token as the Bearer key.
+            # Imported lazily so runs that don't hit ALCF need no globus_sdk.
+            from src.utils.inference_auth_token import get_access_token
+
+            api_key = get_access_token()
+        else:
+            api_key = "dummy_key"
+        client = OpenAI(api_key=api_key, base_url=url)
     else:
         raise ValueError(
             f"Model type {type(model)} not recognized. Please use APIModel, or LocalModel."

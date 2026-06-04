@@ -1,0 +1,38 @@
+defaults:
+  - override hydra/job_logging: disabled
+
+_target_: src.types.ExperimentConfig
+num_episodes: 1
+env_seed: [0]
+verbose: true
+baseline_data_dir: embedding_models/
+exp_name: argonne_smoke
+
+# Self-play smoke test: one model plays encoder/decoder/interceptor. This is the
+# minimum viable end-to-end check that Decrypto can drive a model served by the
+# ALCF inference gateway. No local GPU / vLLM server is needed — the gateway is
+# reached over HTTPS, so this runs fine from a Midway login node (or anywhere
+# with internet + a valid Globus token).
+match_encoder_decoder: true
+fixed_interceptor: alcf_llama3.1_70B
+filter_model: ""
+no_error_history: true
+
+models:
+  # A LocalModel reuses the generic OpenAI-compatible (vLLM) code path. With
+  # use_globus_auth the client authenticates to the gateway with a live Globus
+  # access token instead of a dummy key (see src/agents/role_client.py).
+  - _target_: src.types.LocalModel
+    model_key: alcf_llama3.1_70B
+    # model_id must be a name the gateway currently serves. Confirm the exact
+    # string and that it is "running" with `list-endpoints`
+    # (see midway_alcf_inference_notes.md), and swap if needed — e.g.
+    # meta-llama/Meta-Llama-3.1-8B-Instruct or Qwen/Qwen3-32B.
+    model_id: meta-llama/Meta-Llama-3.1-70B-Instruct
+    urls:
+      # Sophia vLLM endpoint: full OpenAI-compatible surface (chat/completions).
+      - https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1
+    use_globus_auth: true
+    max_tokens: 1000
+    temperature: 0.0
+    max_reasoning_tokens: 0  # 0 = no <think> two-stage path; keep the smoke test simple

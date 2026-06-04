@@ -60,6 +60,19 @@ class LocalModel:
         default=False,
         metadata={"help": "If True, system prompt is passed as user prompt (o1, R1)"},
     )
+    use_globus_auth: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "If True, authenticate to the OpenAI-compatible endpoint with a "
+                "live Globus access token instead of a dummy key. Used for the "
+                "ALCF inference gateway (e.g. "
+                "https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1). "
+                "Requires a prior `python -m src.utils.inference_auth_token "
+                "authenticate`."
+            )
+        },
+    )
 
 
 @dataclass
