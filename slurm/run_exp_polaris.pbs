@@ -1,0 +1,102 @@
+#!/bin/bash
+# Polaris (PBS Pro) dependent EXPERIMENT job — PBS analog of run_exp_midway.sbatch.
+# Submitted by slurm/launch_servers_polaris.sh with `-W depend=after:<server_jids>`
+# and `-v SERVER_JIDS,EXPECTED_MODELS,DECRYPTO_SERVERS_FILE`.
+#
+# Runs on a DIFFERENT node than the server(s): polls `python -m slurm.ping_servers`
+# (which reads DECRYPTO_SERVERS_FILE and hits each server's HSN URL) until the
+# expected number answer, runs run.py against them, then `qdel`s the servers to
+# free the GPUs. HTTP-only — never imports torch/vllm.
+#
+# (PBS reads only lines starting with "#PBS"; annotations go on the line ABOVE.)
+#PBS -N decrypto-polaris-smoke
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+# Whole node (debug hands out full nodes); this job is CPU/HTTP-only so the GPUs idle.
+#PBS -l select=1:ncpus=64:ngpus=4
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=00:30:00
+#PBS -o /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/paper/
+#PBS -e /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/paper/
+
+set -uo pipefail
+
+BASE=/lus/eagle/projects/lighthouse-uchicago/members/mehta5
+REPO_ROOT="$BASE/decrypto"
+VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
+
+cd "$REPO_ROOT"
+mkdir -p "$REPO_ROOT/logs/paper"
+
+JOBTAG="${PBS_JOBID%%.*}"
+WRAP_LOG="$REPO_ROOT/logs/paper/polaris_smoke_${JOBTAG}.log"
+exec > >(stdbuf -oL -eL tee -a "$WRAP_LOG") 2>&1
+echo "=== experiment $PBS_JOBID on $(hostname) at $(date) ==="
+echo "DECRYPTO_SERVERS_FILE=${DECRYPTO_SERVERS_FILE:-<unset>}  EXPECTED_MODELS=${EXPECTED_MODELS:-1}"
+
+# ── Modules + node-local scratch ──
+module use /soft/modulefiles
+module load conda/2025-09-25
+conda activate base
+unset TMPDIR
+NODE_SCRATCH=/local/scratch
+[ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp
+export TMPDIR="$NODE_SCRATCH/${USER}_${JOBTAG}"
+mkdir -p "$TMPDIR"
+
+# ── Stage venv -> node-local SSD (run.py imports numpy/pandas/litellm/gensim/...,
+#    a many-small-file storm that is slow off Lustre on a cold node) ──
+if [ ! -f "$VENV_TARBALL" ]; then echo "FATAL: venv tarball not found: $VENV_TARBALL"; exit 2; fi
+LOCAL_VENV="$TMPDIR/decrypto-serve"
+mkdir -p "$LOCAL_VENV"
+tar xf "$VENV_TARBALL" -C "$LOCAL_VENV"
+export VIRTUAL_ENV="$LOCAL_VENV"
+export PATH="$LOCAL_VENV/bin:$PATH"
+hash -r
+export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
+# Make discovery + the HTTP client robust on the air-gapped compute node.
+export DECRYPTO_SERVERS_FILE="${DECRYPTO_SERVERS_FILE:?qsub -v DECRYPTO_SERVERS_FILE=... required}"
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+# Bypass the ALCF proxy: ping_servers + run.py talk to the server's HSN IP; the
+# compute-node http_proxy would route those in-cluster calls through the
+# unreachable proxy and hang.
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY
+export no_proxy="localhost,127.0.0.1,::1,10.201.0.0/16,.hsn.cm.polaris.alcf.anl.gov,.alcf.anl.gov"
+export NO_PROXY="$no_proxy"
+echo "python: $(command -v python) ($(python --version 2>&1))"
+
+EXPECTED_MODELS=${EXPECTED_MODELS:-1}
+
+echo "Waiting for vLLM servers to come up and answer..."
+WAIT_TIMEOUT=1200
+_t0=$SECONDS
+while true; do
+  READY_COUNT=$(python -m slurm.ping_servers 2>/dev/null | grep -c "Reply time" || true)
+  if [ "$READY_COUNT" -ge "$EXPECTED_MODELS" ]; then
+    echo "All $EXPECTED_MODELS server(s) ready."
+    break
+  fi
+  if [ $((SECONDS-_t0)) -gt $WAIT_TIMEOUT ]; then
+    echo "FATAL: only $READY_COUNT/$EXPECTED_MODELS servers ready after ${WAIT_TIMEOUT}s"
+    echo "Servers dir contents:"; ls -la "$DECRYPTO_SERVERS_FILE" 2>&1 || true
+    [ -n "${SERVER_JIDS:-}" ] && qdel ${SERVER_JIDS//:/ } 2>/dev/null || true
+    exit 46
+  fi
+  echo "  $READY_COUNT / $EXPECTED_MODELS ready — sleeping 30s..."
+  sleep 30
+done
+
+echo "=== running run.py (self-play, 1 episode) ==="
+python run.py \
+  --config-path=config/examples \
+  --config-name=local_polaris \
+  +get_models_from_slurm=true \
+  exp_name=polaris_smoke
+RUN_RC=$?
+echo ">>> run.py exit rc=$RUN_RC"
+
+if [ -n "${SERVER_JIDS:-}" ]; then
+  echo "Smoke finished. Cancelling vLLM server jobs to free the GPUs: ${SERVER_JIDS//:/ }"
+  qdel ${SERVER_JIDS//:/ } 2>/dev/null || true
+fi
+exit $RUN_RC

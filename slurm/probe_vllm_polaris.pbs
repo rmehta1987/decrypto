@@ -1,0 +1,128 @@
+#!/bin/bash
+# Polaris (PBS Pro) toolchain probe — PBS analog of slurm/probe_vllm_013.sbatch.
+# Proves the serving stack end-to-end on a Polaris A100 BEFORE the smoke test:
+#   nvidia-smi -> torch sees the GPU -> vLLM loads Qwen2.5-0.5B and generates.
+#
+# Submit from the repo root (defaults baked into the #PBS header below):
+#     qsub slurm/probe_vllm_polaris.pbs
+# Override the venv tarball / model if needed:
+#     qsub -v VENV_TARBALL=/path/to.tar,MODEL=/path/to/model slurm/probe_vllm_polaris.pbs
+#
+# (PBS reads only lines starting with "#PBS"; annotations go on the line ABOVE.)
+#PBS -N decrypto-vllm-probe
+# Allocation (per sbank-list-allocations; NOT "Uchicago-lighthouse" — PBS rejects that)
+#PBS -A lighthouse-uchicago
+# debug queue: 1-2 nodes, <=1h — right for the probe
+#PBS -q debug
+# Whole node (Polaris debug hands out full nodes: 64 threads, 4x A100-40GB).
+# The probe only touches GPU 0; do NOT add :system=polaris (PBS rejects it).
+#PBS -l select=1:ncpus=64:ngpus=4
+# Polaris REJECTS jobs that don't declare the filesystems they touch
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=00:20:00
+# stdout/stderr -> repo logs/ (trailing slash = directory; must exist at submit time)
+#PBS -o /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/
+#PBS -e /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/
+
+set -uo pipefail
+
+BASE=/lus/eagle/projects/lighthouse-uchicago/members/mehta5
+REPO_ROOT="$BASE/decrypto"
+VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
+MODEL="${MODEL:-$BASE/models/Qwen2.5-0.5B-Instruct}"
+
+cd "$REPO_ROOT"
+mkdir -p "$REPO_ROOT/logs"
+
+# ── Live wrap log: PBS only flushes .OU/.ER at job END, hiding early hangs.
+#    Mirror everything to an eagle file you can `tail -f` while the job runs. ──
+WRAP_LOG="$REPO_ROOT/logs/probe_wrap_${PBS_JOBID%%.*}.log"
+exec > >(stdbuf -oL -eL tee -a "$WRAP_LOG") 2>&1
+
+echo "=== probe $PBS_JOBID on $(hostname) at $(date) ==="
+
+echo ">>> phase: modules"
+module use /soft/modulefiles
+module load conda/2025-09-25
+conda activate base
+
+# ── Node-local scratch (RAID0 SSD); set EARLY (venv tarball extracts into it).
+#    Scrub any inherited TMPDIR; fall back to /tmp if /local/scratch is absent. ──
+unset TMPDIR
+NODE_SCRATCH=/local/scratch
+[ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp
+export TMPDIR="$NODE_SCRATCH/${USER}_${PBS_JOBID%%.*}"
+mkdir -p "$TMPDIR"
+echo "TMPDIR=$TMPDIR"
+
+# ── Stage the venv to node-local SSD from ONE tarball. eagle (Lustre) hangs the
+#    ~70k-small-file `import torch`/vllm storm on a cold node (MARSHAL: ~19 min);
+#    one big sequential read + local extract is ~12 s. ──
+echo ">>> phase: staging venv tarball -> $TMPDIR"
+if [ ! -f "$VENV_TARBALL" ]; then
+    echo "FATAL: venv tarball not found: $VENV_TARBALL (build it: bash slurm/build_decrypto_serve_venv.sh)"
+    exit 2
+fi
+LOCAL_VENV="$TMPDIR/decrypto-serve"
+mkdir -p "$LOCAL_VENV"
+_t0=$SECONDS
+tar xf "$VENV_TARBALL" -C "$LOCAL_VENV"
+echo "    extracted $(du -sh "$LOCAL_VENV" 2>/dev/null | cut -f1) in $((SECONDS-_t0))s"
+
+# Activate MANUALLY (do NOT `source bin/activate` — a relocated venv's activate
+# hardcodes the original build path). Prepending bin/ to PATH makes the relocated
+# python the interpreter; its pyvenv.cfg points sys.path at this copy.
+export VIRTUAL_ENV="$LOCAL_VENV"
+export PATH="$LOCAL_VENV/bin:$PATH"
+hash -r
+echo "    python: $(command -v python) ($(python --version 2>&1))"
+
+# ── Caches on eagle (persistent); go offline — compute nodes have NO internet. ──
+export HF_HOME="$BASE/hf_cache"
+export HUGGINGFACE_HUB_CACHE="$HF_HOME"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export TRITON_CACHE_DIR="$BASE/triton_cache"
+export TORCHINDUCTOR_CACHE_DIR="$BASE/torchinductor_cache"
+mkdir -p "$HF_HOME" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
+
+echo "=== Stage 0: nvidia-smi (backgrounded; it has hung in D-state on bad nodes) ==="
+( timeout 30 nvidia-smi > "$REPO_ROOT/logs/probe_nvidia-smi_${PBS_JOBID%%.*}.txt" 2>&1 & ) || true
+sleep 5
+cat "$REPO_ROOT/logs/probe_nvidia-smi_${PBS_JOBID%%.*}.txt" 2>/dev/null | head -15 || true
+
+echo "=== Stage 1+2: torch sees the GPU (timeout-bounded, unbuffered) ==="
+timeout 300 python -u - <<'PY'
+import sys, torch
+print("python:", sys.version.split()[0], flush=True)
+print("torch :", torch.__version__, "(built against CUDA", torch.version.cuda, ")", flush=True)
+print("cuda available:", torch.cuda.is_available(), flush=True)
+assert torch.cuda.is_available(), "torch cannot see the GPU"
+print("device 0      :", torch.cuda.get_device_name(0), flush=True)
+x = torch.randn(1024, 1024, device="cuda")
+print("matmul ok     :", (x @ x).sum().item() != 0, flush=True)
+PY
+rc=$?
+echo ">>> torch probe rc=$rc"
+[ $rc -ne 0 ] && { echo "FATAL: torch GPU probe failed/timed out (rc=$rc)"; exit 42; }
+
+echo "=== Stage 3: vLLM can load + generate (enforce_eager, low mem) ==="
+timeout 600 python -u - "$MODEL" <<'PY'
+import sys
+from vllm import LLM, SamplingParams
+model = sys.argv[1]
+print("loading:", model, flush=True)
+llm = LLM(
+    model=model,
+    gpu_memory_utilization=0.3,
+    max_model_len=2048,
+    enforce_eager=True,   # skip CUDA graph capture to isolate basic-op failures
+)
+out = llm.generate(["Say hi in five words."], SamplingParams(max_tokens=20, temperature=0.0))
+print("OUT:", out[0].outputs[0].text, flush=True)
+PY
+rc=$?
+echo ">>> vllm probe rc=$rc"
+[ $rc -ne 0 ] && { echo "FATAL: vLLM load/generate failed/timed out (rc=$rc)"; exit 43; }
+
+echo "=== Probe complete: GREEN at $(date) ==="

@@ -1,0 +1,164 @@
+#!/bin/bash
+# Polaris (PBS Pro) vLLM SERVER job — one per served model. Submitted by
+# slurm/launch_servers_polaris.sh via `qsub -v ...` (PBS has no `--wrap`, so the
+# server command lives in this real .pbs script instead of inline like Midway's
+# `sbatch --wrap`).
+#
+# Parameters come in via `qsub -v` (env): MODEL_KEY, MODEL_PATH, PORT, TP,
+# SERVERS_DIR  [, VENV_TARBALL].
+#
+# Once `vllm serve` is healthy, this job appends its own
+# {model_key, model_id, urls:["http://<this-node-HSN>:<port>/v1"], job_ids:[jobid]}
+# as $SERVERS_DIR/<jobid>.json — the scheduler-agnostic DECRYPTO_SERVERS_FILE
+# discovery the runner reads (PBS job names can't carry `model_key:port`, so we
+# do NOT lean on qstat parsing). On exit/qdel it removes that file and stops vLLM.
+#
+# (PBS reads only lines starting with "#PBS"; annotations go on the line ABOVE.)
+#PBS -N decrypto-vllm-srv
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:ncpus=64:ngpus=4
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=01:00:00
+#PBS -o /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/vllm/
+#PBS -e /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/vllm/
+
+set -uo pipefail
+
+BASE=/lus/eagle/projects/lighthouse-uchicago/members/mehta5
+REPO_ROOT="$BASE/decrypto"
+VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
+
+: "${MODEL_KEY:?qsub -v MODEL_KEY=... required}"
+: "${MODEL_PATH:?qsub -v MODEL_PATH=... required}"
+: "${PORT:?qsub -v PORT=... required}"
+: "${TP:=1}"
+: "${SERVERS_DIR:?qsub -v SERVERS_DIR=... required}"
+
+cd "$REPO_ROOT"
+mkdir -p "$REPO_ROOT/logs/vllm" "$SERVERS_DIR"
+
+JOBTAG="${PBS_JOBID%%.*}"
+WRAP_LOG="$REPO_ROOT/logs/vllm/${MODEL_KEY}-${JOBTAG}.wrap.log"
+exec > >(stdbuf -oL -eL tee -a "$WRAP_LOG") 2>&1
+echo "=== vllm server $PBS_JOBID ($MODEL_KEY) on $(hostname) at $(date) ==="
+
+# ── Modules + node-local scratch (set TMPDIR before tarball staging) ──
+module use /soft/modulefiles
+module load conda/2025-09-25
+conda activate base
+unset TMPDIR
+NODE_SCRATCH=/local/scratch
+[ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp
+export TMPDIR="$NODE_SCRATCH/${USER}_${JOBTAG}"
+mkdir -p "$TMPDIR"
+
+# ── Stage venv tarball -> node-local SSD, activate manually (see probe header) ──
+if [ ! -f "$VENV_TARBALL" ]; then
+    echo "FATAL: venv tarball not found: $VENV_TARBALL"; exit 2
+fi
+LOCAL_VENV="$TMPDIR/decrypto-serve"
+mkdir -p "$LOCAL_VENV"
+_t0=$SECONDS
+tar xf "$VENV_TARBALL" -C "$LOCAL_VENV"
+echo "venv extracted in $((SECONDS-_t0))s"
+export VIRTUAL_ENV="$LOCAL_VENV"
+export PATH="$LOCAL_VENV/bin:$PATH"
+hash -r
+
+# ── Caches on eagle; compute nodes have NO internet -> serve a LOCAL path offline ──
+export HF_HOME="$BASE/hf_cache"
+export HUGGINGFACE_HUB_CACHE="$HF_HOME"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export TRITON_CACHE_DIR="$BASE/triton_cache"
+export TORCHINDUCTOR_CACHE_DIR="$BASE/torchinductor_cache"
+mkdir -p "$HF_HOME" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
+
+# ── Bypass the ALCF proxy for in-cluster + offline traffic (compute nodes set
+#    http_proxy=proxy.alcf.anl.gov:3128; leaving it set makes curl/httpx route
+#    localhost + HSN requests through the unreachable proxy and hang). ──
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY
+export no_proxy="localhost,127.0.0.1,::1,10.201.0.0/16,.hsn.cm.polaris.alcf.anl.gov,.alcf.anl.gov"
+export NO_PROXY="$no_proxy"
+
+# ── This node's HSN-routable address (the experiment job runs on a DIFFERENT
+#    Polaris node and reaches us over the high-speed network). Prefer the
+#    resolved 10.201.x.x IP (DNS-independent on the client), fall back to FQDN. ──
+HSN_FQDN="$(hostname).hsn.cm.polaris.alcf.anl.gov"
+HSN_IP="$(getent hosts "$HSN_FQDN" 2>/dev/null | awk '{print $1; exit}')"
+SERVER_ADDR="${HSN_IP:-$HSN_FQDN}"
+echo "HSN address for discovery: $SERVER_ADDR  (fqdn=$HSN_FQDN ip=${HSN_IP:-none})"
+
+SERVERS_FILE="$SERVERS_DIR/${JOBTAG}.json"
+
+cleanup() {
+    echo "$(date): server cleanup (removing $SERVERS_FILE, stopping vLLM)"
+    rm -f "$SERVERS_FILE" "$SERVERS_FILE.tmp" 2>/dev/null || true
+    [ -n "${VLLM_PID:-}" ] && kill "$VLLM_PID" 2>/dev/null || true
+}
+trap cleanup EXIT TERM INT
+
+# ── Launch vLLM via the MODULE entrypoint (NOT the `vllm` console script: its
+#    shebang hardcodes the eagle build path; the module form uses the relocated
+#    python on PATH). --enforce-eager for the smoke (skips torch.compile autotune
+#    cache writes that bit Midway on load). ──
+echo ">>> launching vllm.entrypoints.openai.api_server (model=$MODEL_PATH tp=$TP port=$PORT)"
+python -m vllm.entrypoints.openai.api_server \
+    --model "$MODEL_PATH" \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    --tensor-parallel-size "$TP" \
+    --gpu-memory-utilization 0.90 \
+    --max-model-len 8192 \
+    --enforce-eager \
+    --trust-remote-code \
+    --disable-log-stats &
+VLLM_PID=$!
+
+# ── Wait for health, then register the server for discovery ──
+health_ok() {
+    curl -sf --noproxy '*' "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && return 0
+    python - "$PORT" <<'PYEOF'
+import sys, urllib.request
+op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    op.open(f"http://127.0.0.1:{sys.argv[1]}/health", timeout=3)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+
+echo ">>> waiting for vLLM health on :$PORT (Application startup complete)"
+HEALTH_TIMEOUT=900
+_t0=$SECONDS
+until health_ok; do
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "FATAL: vLLM process exited before becoming healthy"; exit 44
+    fi
+    if [ $((SECONDS-_t0)) -gt $HEALTH_TIMEOUT ]; then
+        echo "FATAL: vLLM not healthy within ${HEALTH_TIMEOUT}s"; exit 45
+    fi
+    sleep 5
+done
+echo ">>> vLLM healthy after $((SECONDS-_t0))s"
+
+python - "$MODEL_KEY" "$MODEL_PATH" "$SERVER_ADDR" "$PORT" "$PBS_JOBID" "$SERVERS_FILE" <<'PYEOF'
+import json, os, sys
+model_key, model_id, addr, port, jobid, out = sys.argv[1:7]
+entry = {
+    "model_key": model_key,
+    "model_id": model_id,
+    "urls": [f"http://{addr}:{port}/v1"],
+    "job_ids": [jobid],
+}
+tmp = out + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(entry, f)
+os.replace(tmp, out)   # atomic publish so a reader never sees a half-written file
+print("registered server ->", out, entry)
+PYEOF
+
+echo ">>> server $MODEL_KEY READY on http://$SERVER_ADDR:$PORT/v1 ; serving until qdel"
+wait "$VLLM_PID"

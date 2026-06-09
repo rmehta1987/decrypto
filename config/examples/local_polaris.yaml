@@ -1,0 +1,29 @@
+defaults:
+  - override hydra/job_logging: disabled
+
+_target_: src.types.ExperimentConfig
+num_episodes: 1
+env_seed: [0]
+verbose: true
+baseline_data_dir: embedding_models/
+exp_name: polaris_smoke
+
+# One small model plays encoder/decoder/interceptor — minimum viable end-to-end
+# to confirm the full self-hosted-vLLM pipeline runs on Polaris. No baselines, no
+# API models. NOT the ALCF inference-gateway path (that is argonne_polaris.yaml).
+match_encoder_decoder: true
+fixed_interceptor: qwen2.5_0.5B
+filter_model: ""
+no_error_history: true
+
+# The server URL is filled in at runtime by +get_models_from_slurm=true (set in
+# slurm/run_exp_polaris.pbs), which reads DECRYPTO_SERVERS_FILE (the dir of JSON
+# files the vLLM server jobs write). `model_key` here must match the model_key
+# the server job writes into its servers JSON. `model_id` must equal the name
+# vLLM serves the model under (we serve under the local path, so model_id = path).
+models:
+  - _target_: src.types.LocalModel
+    model_key: qwen2.5_0.5B
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen2.5-0.5B-Instruct
+    max_tokens: 1000
+    temperature: 0.0

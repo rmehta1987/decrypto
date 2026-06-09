@@ -1,0 +1,179 @@
+#!/bin/bash
+# Polaris (PBS Pro) SINGLE-JOB smoke — vLLM server + Decrypto experiment in ONE
+# job on ONE node. This is the debug-queue-friendly path: the `debug` queue caps
+# a user at max_run=1 AND queued_jobs_threshold=1, so the faithful two-job
+# dependent pattern (server job + dependent experiment job, see
+# launch_servers_polaris.sh) CANNOT run there — two separate jobs can never be
+# Running at once, and the experiment qdels the server, so they'd deadlock.
+#
+# This job instead: starts `vllm serve` in the background, waits for health,
+# registers it via the same DECRYPTO_SERVERS_FILE discovery the runner reads
+# (with the node's HSN-routable IP — real TCP, not localhost), runs one self-play
+# episode through run.py, writes results, then stops vLLM. Use the two-job
+# launcher on a queue that allows >=2 concurrent jobs (e.g. prod / a reservation).
+#
+# Submit:  qsub slurm/smoke_polaris.pbs
+#   override model/tp/venv:  qsub -v MODEL_KEY=...,MODEL_PATH=...,TP=...,VENV_TARBALL=... slurm/smoke_polaris.pbs
+#
+# (PBS reads only lines starting with "#PBS"; annotations go on the line ABOVE.)
+#PBS -N decrypto-polaris-smoke
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:ncpus=64:ngpus=4
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=01:00:00
+#PBS -o /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/paper/
+#PBS -e /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/paper/
+
+set -uo pipefail
+
+BASE=/lus/eagle/projects/lighthouse-uchicago/members/mehta5
+REPO_ROOT="$BASE/decrypto"
+VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
+MODEL_KEY="${MODEL_KEY:-qwen2.5_0.5B}"
+MODEL_PATH="${MODEL_PATH:-$BASE/models/Qwen2.5-0.5B-Instruct}"
+TP="${TP:-1}"
+
+cd "$REPO_ROOT"
+mkdir -p "$REPO_ROOT/logs/paper" "$REPO_ROOT/logs/vllm"
+
+JOBTAG="${PBS_JOBID%%.*}"
+WRAP_LOG="$REPO_ROOT/logs/paper/polaris_smoke_${JOBTAG}.log"
+exec > >(stdbuf -oL -eL tee -a "$WRAP_LOG") 2>&1
+echo "=== smoke $PBS_JOBID ($MODEL_KEY) on $(hostname) at $(date) ==="
+
+# ── Modules + node-local scratch (set TMPDIR before tarball staging) ──
+module use /soft/modulefiles
+module load conda/2025-09-25
+conda activate base
+unset TMPDIR
+NODE_SCRATCH=/local/scratch
+[ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp
+export TMPDIR="$NODE_SCRATCH/${USER}_${JOBTAG}"
+mkdir -p "$TMPDIR"
+
+# ── Stage venv -> node-local SSD, activate manually (relocated venv) ──
+if [ ! -f "$VENV_TARBALL" ]; then echo "FATAL: venv tarball not found: $VENV_TARBALL"; exit 2; fi
+LOCAL_VENV="$TMPDIR/decrypto-serve"
+mkdir -p "$LOCAL_VENV"
+_t0=$SECONDS
+tar xf "$VENV_TARBALL" -C "$LOCAL_VENV"
+echo "venv extracted in $((SECONDS-_t0))s"
+export VIRTUAL_ENV="$LOCAL_VENV"
+export PATH="$LOCAL_VENV/bin:$PATH"
+hash -r
+export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
+
+# ── Caches on eagle; go offline (compute nodes have no internet) ──
+export HF_HOME="$BASE/hf_cache"
+export HUGGINGFACE_HUB_CACHE="$HF_HOME"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export TRITON_CACHE_DIR="$BASE/triton_cache"
+export TORCHINDUCTOR_CACHE_DIR="$BASE/torchinductor_cache"
+mkdir -p "$HF_HOME" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
+
+# ── Bypass the ALCF proxy for in-cluster + offline traffic. Polaris COMPUTE nodes
+#    export http_proxy=proxy.alcf.anl.gov:3128 for outbound; our workload is fully
+#    offline (HF_HUB_OFFLINE) and only talks to localhost / 10.201.x HSN. Leaving the
+#    proxy set makes curl AND the OpenAI/httpx client route in-cluster requests
+#    through the (air-gapped, unreachable) proxy and hang — this was the 900s health
+#    timeout in smoke jid 7186962. ──
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY
+export no_proxy="localhost,127.0.0.1,::1,10.201.0.0/16,.hsn.cm.polaris.alcf.anl.gov,.alcf.anl.gov"
+export NO_PROXY="$no_proxy"
+echo "python: $(command -v python) ($(python --version 2>&1))"
+
+# ── This node's HSN-routable address (real TCP to the HSN NIC, not localhost) ──
+HSN_FQDN="$(hostname).hsn.cm.polaris.alcf.anl.gov"
+HSN_IP="$(getent hosts "$HSN_FQDN" 2>/dev/null | awk '{print $1; exit}')"
+SERVER_ADDR="${HSN_IP:-$(hostname)}"
+PORT=$((8000 + RANDOM % 1000))
+echo "server addr=$SERVER_ADDR port=$PORT"
+
+SERVERS_DIR="$REPO_ROOT/logs/servers/smoke_${JOBTAG}"
+mkdir -p "$SERVERS_DIR"
+SERVERS_FILE="$SERVERS_DIR/${JOBTAG}.json"
+export DECRYPTO_SERVERS_FILE="$SERVERS_DIR"
+
+cleanup() {
+    echo "$(date): cleanup (stop vLLM, remove servers file)"
+    [ -n "${VLLM_PID:-}" ] && kill "$VLLM_PID" 2>/dev/null || true
+    rm -f "$SERVERS_FILE" "$SERVERS_FILE.tmp" 2>/dev/null || true
+}
+trap cleanup EXIT TERM INT
+
+# ── Launch vLLM (module entrypoint; relocated venv can't use the `vllm` shebang) ──
+echo ">>> launching vLLM (model=$MODEL_PATH tp=$TP port=$PORT)"
+python -m vllm.entrypoints.openai.api_server \
+    --model "$MODEL_PATH" \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    --tensor-parallel-size "$TP" \
+    --gpu-memory-utilization 0.90 \
+    --max-model-len 8192 \
+    --enforce-eager \
+    --trust-remote-code \
+    --disable-log-stats \
+    > "$REPO_ROOT/logs/vllm/${MODEL_KEY}-${JOBTAG}.out" 2>&1 &
+VLLM_PID=$!
+
+# Proxy-immune health check: curl with proxy bypassed, python urllib (ProxyHandler{})
+# as fallback; hit 127.0.0.1 (not localhost) to avoid an IPv6-::1 detour.
+health_ok() {
+    curl -sf --noproxy '*' "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && return 0
+    python - "$PORT" <<'PYEOF'
+import sys, urllib.request
+op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    op.open(f"http://127.0.0.1:{sys.argv[1]}/health", timeout=3)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+echo ">>> waiting for vLLM health on :$PORT"
+_t0=$SECONDS
+_diag=0
+until health_ok; do
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "FATAL: vLLM exited before healthy; tail of its log:"; tail -40 "$REPO_ROOT/logs/vllm/${MODEL_KEY}-${JOBTAG}.out"; exit 44
+    fi
+    if [ "$_diag" -eq 0 ] && [ $((SECONDS-_t0)) -gt 45 ]; then
+        echo "DIAG @${_diag}: proxy env:"; env | grep -iE 'proxy' || echo "  (none)"
+        echo "DIAG: listening sockets on :$PORT:"; ss -ltn 2>/dev/null | grep ":$PORT" || echo "  (port not listening?)"
+        _diag=1
+    fi
+    if [ $((SECONDS-_t0)) -gt 900 ]; then echo "FATAL: vLLM not healthy in 900s"; exit 45; fi
+    sleep 5
+done
+echo ">>> vLLM healthy after $((SECONDS-_t0))s"
+
+# ── Register the server for discovery (atomic publish) ──
+python - "$MODEL_KEY" "$MODEL_PATH" "$SERVER_ADDR" "$PORT" "$PBS_JOBID" "$SERVERS_FILE" <<'PYEOF'
+import json, os, sys
+mk, mid, addr, port, jid, out = sys.argv[1:7]
+entry = {"model_key": mk, "model_id": mid, "urls": [f"http://{addr}:{port}/v1"], "job_ids": [jid]}
+tmp = out + ".tmp"
+json.dump(entry, open(tmp, "w")); os.replace(tmp, out)
+print("registered:", entry)
+PYEOF
+
+# ── Confirm discovery + HTTP reachability via ping_servers (same code Midway uses) ──
+echo ">>> ping_servers:"
+python -m slurm.ping_servers || true
+
+echo "=== running run.py (self-play, 1 episode) ==="
+python run.py \
+  --config-path=config/examples \
+  --config-name=local_polaris \
+  +get_models_from_slurm=true \
+  exp_name=polaris_smoke
+RUN_RC=$?
+echo ">>> run.py exit rc=$RUN_RC"
+
+if [ -f "$REPO_ROOT/results/polaris_smoke/experiment_summary.csv" ]; then
+    echo ">>> RESULTS written:"; ls -la "$REPO_ROOT/results/polaris_smoke/"
+    [ $RUN_RC -eq 0 ] && echo "=== SMOKE GREEN at $(date) ==="
+fi
+exit $RUN_RC

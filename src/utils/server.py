@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import glob
 import json
 import os
 import subprocess
@@ -24,10 +25,63 @@ agent_paths = {
 }
 
 
+def _merge_server_entries(entries):
+    """Collapse a flat list of server dicts into one entry per model_key,
+    concatenating their `urls` and `job_ids` (preserves multi-server/TP layouts).
+    """
+    merged = []
+    by_key = {}
+    for entry in entries:
+        key = entry["model_key"]
+        if key in by_key:
+            existing = by_key[key]
+            existing["urls"].extend(entry.get("urls", []))
+            existing["job_ids"].extend(entry.get("job_ids", []))
+        else:
+            normalized = {
+                "model_key": key,
+                "model_id": entry.get("model_id", ""),
+                "urls": list(entry.get("urls", [])),
+                "job_ids": list(entry.get("job_ids", [])),
+            }
+            by_key[key] = normalized
+            merged.append(normalized)
+    return merged
+
+
 def _load_servers_from_file(path):
-    """Read pre-built server list written by run_all.sbatch."""
-    with open(path) as f:
-        return json.load(f)
+    """Read a pre-built server list from a JSON file OR a directory of JSON files.
+
+    Scheduler-agnostic discovery used by both clusters via `DECRYPTO_SERVERS_FILE`
+    (originally written by run_all.sbatch on Slurm; the Polaris/PBS scripts use it
+    as the *primary* mechanism since PBS job names can't carry `model_key:port`).
+
+    - If `path` is a directory, every `*.json` in it is read and merged. This is
+      the Polaris layout: each `vllm serve` job writes its own `<jobid>.json`
+      once it is up, so the directory grows as servers come online and a
+      half-written file is simply skipped until it parses.
+    - If `path` is a file, it is read directly.
+    Each JSON payload may be a single server dict or a list of them.
+    """
+    entries = []
+    if os.path.isdir(path):
+        files = sorted(glob.glob(os.path.join(path, "*.json")))
+    else:
+        files = [path]
+
+    for f in files:
+        try:
+            with open(f) as fh:
+                payload = json.load(fh)
+        except (json.JSONDecodeError, FileNotFoundError, OSError):
+            # A server job may still be writing its file — skip it this pass.
+            continue
+        if isinstance(payload, dict):
+            entries.append(payload)
+        elif isinstance(payload, list):
+            entries.extend(payload)
+
+    return _merge_server_entries(entries)
 
 
 def _discover_servers_from_squeue():

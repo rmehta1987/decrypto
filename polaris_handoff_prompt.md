@@ -5,6 +5,15 @@
 > Claude**. It was authored from the RCC Midway checkout (branch
 > `midway-decrypto`), where the Slurm version of this pipeline is already
 > working end-to-end.
+>
+> **v2 addendum (2026-06):** since this was authored, a sibling project (MARSHAL, a
+> ROLL training pipeline) was brought up GREEN on the SAME Polaris allocation. The
+> Polaris facts this prompt told you to "go confirm" are now **confirmed**, and several
+> gotchas are known in advance. Those are collected in a new section,
+> **"✅ CONFIRMED Polaris facts + proven gotchas,"** right after "Read these first."
+> The proven blow-by-blow record is at **`../MARSHAL/polaris_pbs_notes.md`**. Nothing
+> else below was changed — the new section just supersedes the later
+> "Polaris facts to CONFIRM" section with verified values.
 
 ---
 
@@ -60,6 +69,85 @@ stop — you're in the wrong path.
 - `slurm/ping_servers.py` and `src/runner.py` (~line 1269, the
   `if cfg.get_models_from_slurm:` block) — these are **scheduler-agnostic**; they
   only call `get_available_servers()`. You should not need to change them.
+
+- **`../MARSHAL/polaris_pbs_notes.md`** — NEW (v2). The proven Polaris cluster facts +
+  the gotcha log from a sibling project on this exact allocation. Treat its
+  "Cluster facts (Polaris / ALCF)" table and lessons as ground truth.
+
+## ✅ CONFIRMED Polaris facts + proven gotchas (v2 addendum)
+
+> These were verified running real jobs on this allocation (June 2026). They
+> **supersede the "Polaris facts to CONFIRM" section below** (kept intact for history).
+> ⚠️ MARSHAL is a *training* pipeline (Ray + DeepSpeed + weight-sync + Megatron);
+> Decrypto is *inference serving only*. So only the **cluster-level** facts/gotchas
+> apply to you — see "What does NOT apply" at the end of this section.
+
+### Confirmed cluster facts (no longer "go check")
+
+| Item | Confirmed value |
+|---|---|
+| **Account (`-A`)** | **`lighthouse-uchicago`** ⚠️ NOT "Uchicago-lighthouse" (PBS rejects that). Verify with `sbank-list-allocations`; thousands of node-hours free. |
+| **Queue (`-q`)** | **`debug`** for the smoke (1–2 nodes, ≤1 h). Also `debug-scaling`, `prod`. |
+| **Filesystems** | **`-l filesystems=home:eagle`** — REQUIRED; PBS rejects jobs without it. |
+| **Select line** | `-l select=1:ncpus=64:ngpus=4` (do NOT add `:system=polaris`). |
+| GPUs | **4× NVIDIA A100, 40 GB each** (sm_80) — tight vs Midway's 140 GB H200. |
+| CPU/RAM | AMD EPYC Milan, 64 hardware threads, 512 GiB. |
+| **Conda module** | `module use /soft/modulefiles && module load conda/2025-09-25 && conda activate base` (build/activate your venv on top). Replaces Midway's miniforge/mamba line. |
+| Native CUDA toolkit | `/soft/compilers/cudatoolkit/cuda-12.4.1` (driver supports ≥ CUDA 12.8). |
+| **Node-local SSD** | `/local/scratch` exists, fast + writable (RAID0). Use for `TMPDIR`; fall back to `/tmp`. |
+| Member storage root | `/lus/eagle/projects/lighthouse-uchicago/members/mehta5/` (repo, venv, models, caches, server-discovery files). |
+| Job ids | `1234567.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov`; bare number via `${PBS_JOBID%%.*}`. |
+| Cross-node (HSN) | Compute nodes named like `x3001c0s7b1n0`; HSN IPs in `10.201.x.x`; FQDN suffix `.hsn.cm.polaris.alcf.anl.gov`. Capture the node's HSN address at server startup for discovery. |
+| Containers | Official container path unusable (no `.sif`, registry unreachable). Run **native** in a conda venv (your plan anyway). |
+
+### Gotchas proven on this allocation — these WILL bite you
+
+1. **A venv on `/lus/eagle` (Lustre) makes `import torch`/vllm "HANG" on cold compute
+   nodes.** Biggest time-sink in the sibling port. Lustre is fast for big sequential
+   reads but terrible for the ~70k-tiny-files access pattern of importing an ML env:
+   ~19 min on a cold node (vs 47 s warm) — looks like a hang. **Fix:** build the venv
+   once, **tar it**, and in every job **extract the tar to `/local/scratch`** and run
+   from there (one big-file read; ~12 s for 8 GB). Activate **manually** (do NOT
+   `source bin/activate` — it hardcodes the original path): `export VIRTUAL_ENV=$LOCAL_VENV;
+   export PATH=$LOCAL_VENV/bin:$PATH; hash -r`. Working example:
+   `../MARSHAL/scripts/train_polaris.pbs`.
+2. **Compute nodes have NO outbound internet.** Network calls fail (a stray
+   `connect(8.8.8.8)` raised `OSError: Network is unreachable`; HF downloads fail too).
+   **Pre-download every model on a login node** into the eagle model store; the smoke
+   model is already staged at
+   `/lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen2.5-0.5B-Instruct`.
+   In the job: `export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`, point `HF_HOME` at
+   eagle, and give `vllm serve` a **local path**, not a hub id.
+3. **TMPDIR hygiene.** `unset TMPDIR SLURM_TMPDIR; export
+   TMPDIR=/local/scratch/$USER_${PBS_JOBID%%.*}; mkdir -p`. Point
+   `TORCHINDUCTOR_CACHE_DIR`/`TRITON_CACHE_DIR` at eagle (persistent), not scratch.
+4. **`--enforce-eager` for the smoke** (skips torch.compile; avoids autotune-cache
+   write problems and speeds first load).
+5. **Pin `transformers<5` + `tokenizers<0.22`.** A fresh install pulls transformers 5.x,
+   which dropped `all_special_tokens_extended` that vLLM 0.8.x calls → load-time error.
+   Sibling env: transformers 4.51.2 / tokenizers 0.21.4 / numpy 1.26.4 / torch 2.6.0+cu124
+   / vllm 0.8.4. Don't blindly `pip install -r requirements.txt` (it pins torch 2.9 /
+   vllm 0.13 — unvalidated here). Runner side is HTTP-only, so one env hosts both.
+6. **A per-job cap of `pids.max = 4096`** (every process+thread in the job). It mauled
+   the *training* sibling (Ray fans out dozens of workers). `vllm serve` is far lighter
+   (one engine, one worker per GPU) and should fit easily — but if you see
+   `pthread_create ... Resource temporarily unavailable` / `OpenBLAS blas_thread_init
+   ... failed`, that's this cap; set `OMP_NUM_THREADS=8` (and the OPENBLAS/MKL/NUMEXPR
+   family) to cut per-process threads.
+7. **PBS prologue / filesystem mounts can be slow or flaky** (20–40 min from `R` to
+   script start; during an ALCF incident, jobs can hang the whole walltime with 0-byte
+   output). If a job is silent for long, check `pbsnodes -l` for offlined nodes before
+   assuming your bug. Stream a live wrap-log
+   (`exec > >(stdbuf -oL -eL tee -a $WRAP_LOG) 2>&1`) so you can see where it is.
+
+### What does NOT apply to you (MARSHAL-only, training-specific — ignore)
+- DeepSpeed `fused_adam` JIT compile (nvcc + gcc-12) — no training here.
+- ROLL/Ray weight-sync into a running engine, and the **vLLM-V1 "can't serialize
+  CUDA/bf16 tensor" bug** — that was about *updating* weights live. You load once and
+  serve; V1 is fine.
+- Distinct-GPU placement / NCCL broadcast, Megatron tensor-parallel internals,
+  `RAY_NUM_CPUS`, env-worker fan-out — Ray/training concepts. For TP, just use
+  `vllm serve --tensor-parallel-size N`; no Ray.
 
 ## The Slurm→PBS porting surface
 
