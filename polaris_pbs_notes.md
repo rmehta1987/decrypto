@@ -346,6 +346,7 @@ never a cluster-wide `find`).
 | `logs/probe_wrap_7197372.log`, `logs/7197372.*.OU/.ER` | 7197372 | debug | Qwen2.5-72B / TP4 | Unsuccessful | Weights loaded (33.98 GiB/GPU in 273 s — TP=4 fits) but at mem_util 0.95 / max_len 8192 the engine's profiling pass left no memory for KV blocks: `ValueError: No available memory for the cache blocks` → worker SIGKILL (rc=137). First fix attempt: cap the profiling/prefill batch |
 | `logs/probe_wrap_7197374.log`, `logs/7197374.*.OU/.ER` | 7197374 | debug | Qwen2.5-72B / TP4 | Unsuccessful | Same `No available memory for the cache blocks` despite `max_num_batched_tokens=2048` being active (`Chunked prefill is enabled with max_num_batched_tokens=2048` in the log) — the profiling peak is dominated by fixed costs (non-torch NCCL/IPC buffers for TP=4 + the dummy-sampler logits, which scale with `max_num_seqs`, default 1024, ~150k vocab), not the prefill batch. Next: mem_util 0.97 + `max_num_seqs 64` (job 7197375) |
 | `logs/probe_wrap_7197375.log`, `logs/probe_nvidia-smi_7197375.txt`, `logs/7197375.*.OU/.ER` | 7197375 | debug | Qwen2.5-72B / TP4 | Successful | On `x3204c0s7b0n0`: TP=4, mem_util 0.97, max_len 8192, `max_num_batched_tokens 2048`, `max_num_seqs 64`. Weights 33.98 GiB/GPU in 232 s; **KV cache 18,800 tokens (2.29× concurrency at 8,192 tokens/request)**; generated a completion; `Exit_status=0`. This is the verified 72B serving configuration |
+| `logs/paper/polaris_smoke_7197376.log`, `logs/vllm/qwen2.5_72B-7197376.out`, `logs/paper/7197376.*.OU/.ER` | 7197376 | debug | Qwen2.5-72B / TP4 | Successful | Fused server-sanity smoke (RUN_EPISODE=0) on `x3204c0s7b0n0`: `vllm serve` healthy in 75 s (warm node — same node as 7197375; cold load is ~240 s), registered `http://10.201.0.184:8615/v1` via `DECRYPTO_SERVERS_FILE`, `ping_servers` replied in 1.45 s, direct HTTP chat completion in 1.0 s, KV cache 18,800 tokens re-confirmed over the serve path; "SMOKE (server-sanity mode) PASSED" |
 
 ---
 
@@ -483,6 +484,20 @@ never a cluster-wide `find`).
   higher; requests beyond KV capacity queue inside vLLM. All serving scripts
   now expose `MAX_NUM_BATCHED_TOKENS` / `MAX_NUM_SEQS`, and the launcher pins
   the 72B to `0.97 / 8192 / 2048 / 64`.
+- **2026-06-12 — Rung 2 Successful: fused 72B server smoke (7197376).** Added a
+  `RUN_EPISODE=0` server-sanity mode to `smoke_polaris.pbs` (health + discovery
+  registration + `ping_servers` + one direct HTTP chat completion, skipping the
+  run.py episode — the 0.5B-specific `local_polaris` config does not apply to a
+  72B-only smoke, and an episode may not fit debug's 1 h walltime). With the
+  verified 72B config: healthy in 75 s (warm node; cold ~240 s), HSN
+  registration and a 1.0 s completion over `/v1/chat/completions`. The full
+  `vllm serve` HTTP path for the 72B is proven.
+- **2026-06-12 — Launched the 3-model orchestration smoke (rungs 3+4) on
+  `preemptable`:** servers 7197379 (qwen2.5_72B), 7197380 (qwen3_8b), 7197381
+  (qwen3_4b) + dependent experiment 7197382 (`local_polaris_3model`, 1 seed ×
+  1 episode = 27 games, `exp_name=polaris_3model`), server walltime 02:30,
+  experiment 02:00. The experiment log's ready-poll (3/3 servers) is the rung-3
+  evidence; the 27-combo `experiment_summary.csv` is rung 4's.
 - **2026-06-12 — Launcher-mechanics smoke on `preemptable` (first multi-job
   launch).** Before the 72B is staged, validated the multi-server machinery with
   the two Qwen3 models alone: added an `ONLY_MODELS` subset filter to
