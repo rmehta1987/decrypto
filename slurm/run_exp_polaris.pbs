@@ -1,7 +1,10 @@
 #!/bin/bash
 # Polaris (PBS Pro) dependent EXPERIMENT job — PBS analog of run_exp_midway.sbatch.
 # Submitted by slurm/launch_servers_polaris.sh with `-W depend=after:<server_jids>`
-# and `-v SERVER_JIDS,EXPECTED_MODELS,DECRYPTO_SERVERS_FILE`.
+# and `-v SERVER_JIDS,EXPECTED_MODELS,DECRYPTO_SERVERS_FILE` plus optionally
+# CONFIG_NAME (hydra --config-name), EXP_NAME (results/<EXP_NAME>/), WAIT_TIMEOUT
+# (server-ready poll, s), SEEDS ("0 1 2", space-separated -> env_seed list) and
+# NUM_EPISODES. Queue/walltime come from the launcher's qsub flags.
 #
 # Runs on a DIFFERENT node than the server(s): polls `python -m slurm.ping_servers`
 # (which reads DECRYPTO_SERVERS_FILE and hits each server's HSN URL) until the
@@ -66,9 +69,20 @@ export NO_PROXY="$no_proxy"
 echo "python: $(command -v python) ($(python --version 2>&1))"
 
 EXPECTED_MODELS=${EXPECTED_MODELS:-1}
+CONFIG_NAME=${CONFIG_NAME:-local_polaris}
+EXP_NAME=${EXP_NAME:-polaris_smoke}
+# Scale knobs. `qsub -v` values cannot carry commas, so seeds come in
+# space-separated (SEEDS="0 1 2 3 4") and are rebuilt into a hydra list here.
+SEEDS=${SEEDS:-}
+NUM_EPISODES=${NUM_EPISODES:-}
+EXTRA_OVERRIDES=()
+[ -n "$SEEDS" ] && EXTRA_OVERRIDES+=("env_seed=[${SEEDS// /,}]")
+[ -n "$NUM_EPISODES" ] && EXTRA_OVERRIDES+=("num_episodes=$NUM_EPISODES")
 
 echo "Waiting for vLLM servers to come up and answer..."
-WAIT_TIMEOUT=1200
+# 70B cold-loads in minutes, and queue skew can start this job well before the
+# servers; the launcher passes a value sized to the slowest model.
+WAIT_TIMEOUT=${WAIT_TIMEOUT:-1200}
 _t0=$SECONDS
 while true; do
   READY_COUNT=$(python -m slurm.ping_servers 2>/dev/null | grep -c "Reply time" || true)
@@ -86,14 +100,20 @@ while true; do
   sleep 30
 done
 
-echo "=== running run.py (self-play, 1 episode) ==="
+echo "=== running run.py (config=$CONFIG_NAME exp_name=$EXP_NAME overrides='${EXTRA_OVERRIDES[*]:-}') ==="
 python run.py \
   --config-path=config/examples \
-  --config-name=local_polaris \
+  --config-name="$CONFIG_NAME" \
   +get_models_from_slurm=true \
-  exp_name=polaris_smoke
+  exp_name="$EXP_NAME" \
+  "${EXTRA_OVERRIDES[@]}"
 RUN_RC=$?
 echo ">>> run.py exit rc=$RUN_RC"
+if [ -f "$REPO_ROOT/results/$EXP_NAME/experiment_summary.csv" ]; then
+    echo ">>> RESULTS: results/$EXP_NAME/experiment_summary.csv ($(wc -l < "$REPO_ROOT/results/$EXP_NAME/experiment_summary.csv") lines)"
+else
+    echo ">>> WARNING: results/$EXP_NAME/experiment_summary.csv not written"
+fi
 
 if [ -n "${SERVER_JIDS:-}" ]; then
   echo "Smoke finished. Cancelling vLLM server jobs to free the GPUs: ${SERVER_JIDS//:/ }"

@@ -5,8 +5,13 @@
 #
 # Submit from the repo root (defaults baked into the #PBS header below):
 #     qsub slurm/probe_vllm_polaris.pbs
-# Override the venv tarball / model if needed:
-#     qsub -v VENV_TARBALL=/path/to.tar,MODEL=/path/to/model slurm/probe_vllm_polaris.pbs
+# Override the venv tarball / model(s) if needed. MODEL_SPECS is a
+# SEMICOLON-separated list (commas would be eaten by `qsub -v`) of
+# colon-separated entries  path:tp:gpu_mem_util:max_model_len  — each is loaded
+# at its tensor-parallel size and must generate a completion (one debug job can
+# probe several models back-to-back; debug caps a user at 1 running + 1 queued):
+#     qsub -v MODEL_SPECS="$BASE/models/Qwen3-8B:1:0.90:8192;$BASE/models/Qwen3-4B:1:0.90:8192" \
+#          slurm/probe_vllm_polaris.pbs
 #
 # (PBS reads only lines starting with "#PBS"; annotations go on the line ABOVE.)
 #PBS -N decrypto-vllm-probe
@@ -29,7 +34,11 @@ set -uo pipefail
 BASE=/lus/eagle/projects/lighthouse-uchicago/members/mehta5
 REPO_ROOT="$BASE/decrypto"
 VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
-MODEL="${MODEL:-$BASE/models/Qwen2.5-0.5B-Instruct}"
+# Default preserves the original single-model probe (0.5B, TP=1, low mem).
+MODEL_SPECS="${MODEL_SPECS:-$BASE/models/Qwen2.5-0.5B-Instruct:1:0.3:2048}"
+# Per-model load+generate timeout (s). 70B at TP=4 reads ~141 GB off Lustre —
+# allow far more than the 0.5B's seconds.
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-1500}"
 
 cd "$REPO_ROOT"
 mkdir -p "$REPO_ROOT/logs"
@@ -106,23 +115,35 @@ rc=$?
 echo ">>> torch probe rc=$rc"
 [ $rc -ne 0 ] && { echo "FATAL: torch GPU probe failed/timed out (rc=$rc)"; exit 42; }
 
-echo "=== Stage 3: vLLM can load + generate (enforce_eager, low mem) ==="
-timeout 600 python -u - "$MODEL" <<'PY'
+echo "=== Stage 3: vLLM can load + generate each model at its TP (enforce_eager) ==="
+PROBE_FAILED=0
+IFS=';' read -ra SPECS <<< "$MODEL_SPECS"
+for spec in "${SPECS[@]}"; do
+    IFS=':' read -r MODEL TP GPU_MEM_UTIL MAX_MODEL_LEN <<< "$spec"
+    TP="${TP:-1}"; GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"; MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+    echo "--- probing: $MODEL  (tp=$TP mem_util=$GPU_MEM_UTIL max_len=$MAX_MODEL_LEN) ---"
+    timeout "$PROBE_TIMEOUT" python -u - "$MODEL" "$TP" "$GPU_MEM_UTIL" "$MAX_MODEL_LEN" <<'PY'
 import sys
 from vllm import LLM, SamplingParams
-model = sys.argv[1]
-print("loading:", model, flush=True)
+model, tp, mem, mlen = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])
+print("loading:", model, "tp:", tp, flush=True)
 llm = LLM(
     model=model,
-    gpu_memory_utilization=0.3,
-    max_model_len=2048,
+    tensor_parallel_size=tp,
+    gpu_memory_utilization=mem,
+    max_model_len=mlen,
     enforce_eager=True,   # skip CUDA graph capture to isolate basic-op failures
 )
 out = llm.generate(["Say hi in five words."], SamplingParams(max_tokens=20, temperature=0.0))
 print("OUT:", out[0].outputs[0].text, flush=True)
 PY
-rc=$?
-echo ">>> vllm probe rc=$rc"
-[ $rc -ne 0 ] && { echo "FATAL: vLLM load/generate failed/timed out (rc=$rc)"; exit 43; }
+    rc=$?
+    echo ">>> vllm probe rc=$rc for $MODEL (tp=$TP)"
+    if [ $rc -ne 0 ]; then
+        echo "FATAL: vLLM load/generate failed/timed out (rc=$rc) for $MODEL"
+        PROBE_FAILED=1
+    fi
+done
+[ $PROBE_FAILED -ne 0 ] && exit 43
 
-echo "=== Probe complete: GREEN at $(date) ==="
+echo "=== Probe complete: all models loaded and generated at $(date) ==="

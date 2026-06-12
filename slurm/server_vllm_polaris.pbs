@@ -5,7 +5,10 @@
 # `sbatch --wrap`).
 #
 # Parameters come in via `qsub -v` (env): MODEL_KEY, MODEL_PATH, PORT, TP,
-# SERVERS_DIR  [, VENV_TARBALL].
+# SERVERS_DIR  [, VENV_TARBALL, GPU_MEM_UTIL, MAX_MODEL_LEN, HEALTH_TIMEOUT].
+# Queue/walltime are overridden at submit time (e.g. `qsub -q preemptable -r y
+# -l walltime=18:00:00 ...`) — the launcher does this; the #PBS defaults below
+# stay debug-sized.
 #
 # Once `vllm serve` is healthy, this job appends its own
 # {model_key, model_id, urls:["http://<this-node-HSN>:<port>/v1"], job_ids:[jobid]}
@@ -34,6 +37,13 @@ VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
 : "${PORT:?qsub -v PORT=... required}"
 : "${TP:=1}"
 : "${SERVERS_DIR:?qsub -v SERVERS_DIR=... required}"
+# 70B at TP=4 on 40 GB cards: weights ~35 GB/GPU, so KV-cache headroom comes
+# from these two knobs (raise mem_util / lower max_len if the engine OOMs).
+: "${GPU_MEM_UTIL:=0.90}"
+: "${MAX_MODEL_LEN:=8192}"
+# Cold-load time scales with weight bytes off Lustre: 0.5B was ~21 s; 70B is
+# minutes. Launcher passes a larger value for big models.
+: "${HEALTH_TIMEOUT:=900}"
 
 cd "$REPO_ROOT"
 mkdir -p "$REPO_ROOT/logs/vllm" "$SERVERS_DIR"
@@ -103,14 +113,14 @@ trap cleanup EXIT TERM INT
 #    shebang hardcodes the eagle build path; the module form uses the relocated
 #    python on PATH). --enforce-eager for the smoke (skips torch.compile autotune
 #    cache writes that bit Midway on load). ──
-echo ">>> launching vllm.entrypoints.openai.api_server (model=$MODEL_PATH tp=$TP port=$PORT)"
+echo ">>> launching vllm.entrypoints.openai.api_server (model=$MODEL_PATH tp=$TP port=$PORT mem_util=$GPU_MEM_UTIL max_len=$MAX_MODEL_LEN)"
 python -m vllm.entrypoints.openai.api_server \
     --model "$MODEL_PATH" \
     --host 0.0.0.0 \
     --port "$PORT" \
     --tensor-parallel-size "$TP" \
-    --gpu-memory-utilization 0.90 \
-    --max-model-len 8192 \
+    --gpu-memory-utilization "$GPU_MEM_UTIL" \
+    --max-model-len "$MAX_MODEL_LEN" \
     --enforce-eager \
     --trust-remote-code \
     --disable-log-stats &
@@ -130,8 +140,7 @@ except Exception:
 PYEOF
 }
 
-echo ">>> waiting for vLLM health on :$PORT (Application startup complete)"
-HEALTH_TIMEOUT=900
+echo ">>> waiting for vLLM health on :$PORT (Application startup complete; timeout ${HEALTH_TIMEOUT}s)"
 _t0=$SECONDS
 until health_ok; do
     if ! kill -0 "$VLLM_PID" 2>/dev/null; then

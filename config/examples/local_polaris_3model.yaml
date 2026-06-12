@@ -1,0 +1,51 @@
+defaults:
+  - override hydra/job_logging: disabled
+
+_target_: src.types.ExperimentConfig
+# Cross-play matrix: all three models are available to all three roles, so the
+# runner's itertools.product(encoder, decoder, interceptor) yields 3x3x3 = 27
+# role combinations per env_seed. Start at 1 seed x 1 episode (27 games) to
+# prove the matrix end-to-end; scale env_seed/num_episodes via CLI overrides
+# for the production run (e.g. 'env_seed=[0,1,2,3,4]').
+num_episodes: 1
+env_seed: [0]
+verbose: false
+baseline_data_dir: embedding_models/
+exp_name: polaris_3model
+
+# Full cross-play: no fixed roles, no encoder/decoder matching, no filtering.
+match_encoder_decoder: false
+fixed_encoder: ""
+fixed_decoder: ""
+fixed_interceptor: ""
+filter_model: ""
+no_error_history: true
+
+# Server URLs are filled at runtime by +get_models_from_slurm=true (set in
+# slurm/run_exp_polaris.pbs), which reads DECRYPTO_SERVERS_FILE (the dir of
+# JSON files the vLLM server jobs write). `model_key` must match what each
+# server job registers; `model_id` must equal the name vLLM serves under —
+# we serve under the LOCAL path (compute nodes are offline), so model_id = path.
+#
+# Qwen3 are reasoning models that emit <think> blocks; max_reasoning_tokens
+# caps the thinking stage so the ANSWER block is always produced (two-stage
+# pattern in role_client.py — without it the model can spend its whole token
+# budget thinking and never emit the JSON the runner parses).
+models:
+  - _target_: src.types.LocalModel
+    model_key: llama3.1_70B
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Meta-Llama-3.1-70B-Instruct
+    max_tokens: 1000
+    temperature: 0.0
+  - _target_: src.types.LocalModel
+    model_key: qwen3_8b
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen3-8B
+    max_tokens: 2500
+    max_reasoning_tokens: 2000
+    temperature: 0.0
+  - _target_: src.types.LocalModel
+    model_key: qwen3_4b
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen3-4B
+    max_tokens: 2500
+    max_reasoning_tokens: 2000
+    temperature: 0.0
