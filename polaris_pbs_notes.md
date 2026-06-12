@@ -347,6 +347,15 @@ never a cluster-wide `find`).
 | `logs/probe_wrap_7197374.log`, `logs/7197374.*.OU/.ER` | 7197374 | debug | Qwen2.5-72B / TP4 | Unsuccessful | Same `No available memory for the cache blocks` despite `max_num_batched_tokens=2048` being active (`Chunked prefill is enabled with max_num_batched_tokens=2048` in the log) — the profiling peak is dominated by fixed costs (non-torch NCCL/IPC buffers for TP=4 + the dummy-sampler logits, which scale with `max_num_seqs`, default 1024, ~150k vocab), not the prefill batch. Next: mem_util 0.97 + `max_num_seqs 64` (job 7197375) |
 | `logs/probe_wrap_7197375.log`, `logs/probe_nvidia-smi_7197375.txt`, `logs/7197375.*.OU/.ER` | 7197375 | debug | Qwen2.5-72B / TP4 | Successful | On `x3204c0s7b0n0`: TP=4, mem_util 0.97, max_len 8192, `max_num_batched_tokens 2048`, `max_num_seqs 64`. Weights 33.98 GiB/GPU in 232 s; **KV cache 18,800 tokens (2.29× concurrency at 8,192 tokens/request)**; generated a completion; `Exit_status=0`. This is the verified 72B serving configuration |
 | `logs/paper/polaris_smoke_7197376.log`, `logs/vllm/qwen2.5_72B-7197376.out`, `logs/paper/7197376.*.OU/.ER` | 7197376 | debug | Qwen2.5-72B / TP4 | Successful | Fused server-sanity smoke (RUN_EPISODE=0) on `x3204c0s7b0n0`: `vllm serve` healthy in 75 s (warm node — same node as 7197375; cold load is ~240 s), registered `http://10.201.0.184:8615/v1` via `DECRYPTO_SERVERS_FILE`, `ping_servers` replied in 1.45 s, direct HTTP chat completion in 1.0 s, KV cache 18,800 tokens re-confirmed over the serve path; "SMOKE (server-sanity mode) PASSED" |
+| `logs/vllm/qwen3_8b-7197358.wrap.log`, `logs/vllm/7197358.*.OU/.ER` | 7197358 | preemptable | Qwen3-8B / TP1 | Partially successful | 2-model mechanics test server: preempted once and requeued by `-r y` (run_count=2), came healthy, registered, answered `ping_servers` (200 OK in its log); `qdel`'d by the experiment's failure path at 12:44 |
+| `logs/vllm/qwen3_4b-7197359.wrap.log`, `logs/vllm/7197359.*.OU/.ER` | 7197359 | preemptable | Qwen3-4B / TP1 | Unsuccessful | **Died at exactly its walltime while idle-serving** (stime 08:11:38 → obittime 09:42:25 = 1:30:47 ≈ walltime 01:30, `Exit_status=-29`, run_count=2): the dependent experiment never got a node while this server burned its clock. The queue-skew failure mode |
+| `logs/paper/polaris_smoke_7197360.log`, `logs/paper/7197360.*.OU/.ER` | 7197360 | preemptable | 2-model experiment | Unsuccessful | Ran (and was itself preempted/rerun) three times; in the final run only 1/2 servers still existed (the 4B had hit walltime) → `FATAL: only 1/2 servers ready after 1800s`, exit 46, correctly `qdel`'d the surviving server. Validated: dependency release, ready-poll, SEEDS passthrough (visible in env), failure-path qdel |
+| `logs/vllm/qwen3_8b-7197380.wrap.log`, `logs/vllm/7197380.*.OU/.ER` | 7197380 | preemptable | Qwen3-8B / TP1 | Unsuccessful | 3-model launch server: healthy in 37 s, registered `10.201.4.87:8421` — then died at exactly its walltime (stime 10:04:05 → obittime 12:35:10 ≈ 02:30, `Exit_status=-29`) while the experiment job was still queued. Cleanup removed its JSON |
+| `logs/vllm/qwen3_4b-7197381.wrap.log`, `logs/vllm/7197381.*.OU/.ER` | 7197381 | preemptable | Qwen3-4B / TP1 | Unsuccessful | Same walltime-skew death: healthy in 27 s, registered `10.201.4.160:8807`, died 12:13:27 after its full 02:30 walltime, experiment still queued |
+| `logs/vllm/qwen2.5_72B-7197379.wrap.log`, `logs/vllm/7197379.*.OU/.ER` | 7197379 | preemptable | Qwen2.5-72B / TP4 | Partially successful | Started 12:44 (3.4 h queue skew after submission at 05:21), healthy, registered `7197379.json` at 12:49, answered the experiment's pings (the "1/3 ready") for an hour — then `qdel`'d by 7197382's failure path at 13:45. The 72B serving config itself worked over the two-job path |
+| `logs/paper/polaris_smoke_7197382.log`, `logs/paper/7197382.*.OU/.ER` | 7197382 | preemptable | 3-model experiment | Unsuccessful | Started 12:44 alongside the 72B, but the two Qwen3 servers had already died at their walltimes hours earlier; replacement servers (7197525/7197526, submitted 12:48 into the same SERVERS_DIR) were still queued when WAIT_TIMEOUT expired: `FATAL: only 1/3 servers ready after 3600s`, exit 46, qdel'd the surviving 72B. 7197525 started at almost that exact minute; both replacements were then qdel'd as orphans |
+| (no log — qdel'd while queued) | 7197525, 7197526, 7197528 | preemptable | replacements + fused copy | Aborted | 7197525/26: orphaned Qwen3 replacement servers, qdel'd after their experiment died. 7197528: preemptable copy of the fused smoke, qdel'd once the capacity copy started first |
+| `logs/paper/polaris_fused_7197574.log`, `logs/vllm/{qwen2.5_72B,qwen3_8b,qwen3_4b}-7197574.wrap.log`, `logs/paper/7197574.*.OU/.ER` | 7197574 | **capacity** | 3 servers + experiment, fused 4-node job | **Successful — rungs 3+4** | Started 1 min after submission. All 3 servers ready in **361 s** (one per node via `mpiexec --hosts`); ran the full **27-combination** cross-play matrix (1 seed × 1 episode); `run.py` rc=0; `results/polaris_3model_fused_cap/experiment_summary.csv` = 27 rows, verified to contain all 27 unique (encoder, decoder, interceptor) triples; per-combo dirs written incrementally. Total job 25 min. "FUSED RUN COMPLETE" |
 
 ---
 
@@ -506,6 +515,62 @@ never a cluster-wide `find`).
   `SEEDS` passthrough). Submitted servers 7197358 (qwen3_8b) + 7197359
   (qwen3_4b) and dependent experiment 7197360. Outcome recorded in the ledger
   when complete.
+- **2026-06-12 — The two-job pattern's real failure mode on a contended queue:
+  walltime skew (jobs 7197359/7197380/7197381 Unsuccessful).** All three
+  servers died with `Exit_status=-29` at *exactly* their requested walltime
+  (obittime − stime = walltime to within a minute), having served idle the
+  whole time: PBS schedules the server jobs and the dependent experiment job
+  independently, and on a contended `preemptable` queue (55 queued / 38 running
+  observed) the experiment's own node never freed before the servers' clocks
+  ran out. `-W depend=after:` only orders *starts*; it provides no
+  co-scheduling. Two further observations from the same window: preemption
+  with `-r y` does requeue (7197358, run_count=2), and a rerun server
+  re-registers at a *new* address — which the runner, reading URLs once at
+  startup, would never see; a mid-run preemption of any server therefore
+  breaks a long run even if the server itself recovers. Conclusions: (1)
+  two-job runs need server walltime ≫ experiment walltime + worst-case queue
+  skew, and (2) the robust vehicle for the 8–16 h production run is a **fused
+  single multi-node job** — one queue wait, atomic lifetime, and eligible for
+  `capacity` (1–4 nodes, ≤168 h, **no preemption**, 1 running job/user).
+- **2026-06-12 — Tactical salvage + fused job authored.** The 3-model
+  experiment (7197382) and the 72B server (7197379) finally started ~12:44 with
+  the two Qwen3 servers already dead; resubmitted them (7197525 qwen3_8b,
+  7197526 qwen3_4b, walltime 03:00) into the *same* `SERVERS_DIR` — discovery
+  merges by `model_key`, and the dead servers' cleanup traps had removed their
+  stale JSONs, so the experiment simply waits for the newcomers (its
+  WAIT_TIMEOUT runs to ~13:45). In parallel, authored the structural fix:
+  `slurm/fused_3model_polaris.pbs` (one 4-node job: node 0 experiment, nodes
+  1–3 one `vllm serve` each via `mpiexec --hosts`, using the extracted
+  per-node bootstrap `slurm/start_vllm_server_node.sh`) and submitted it as a
+  27-game smoke (7197528, `exp_name=polaris_3model_fused`). Whichever attempt
+  completes first closes rungs 3+4; the fused path is the production vehicle.
+- **2026-06-12 — Two-job attempt abandoned after a second skew loss.** 7197382
+  timed out (1/3 ready after 3600 s) at 13:45 — the minute its replacement 8B
+  server finally started — and its failure path `qdel`'d the healthy 72B
+  (7197379). Cut losses: `qdel`'d the now-orphaned replacements 7197525/7197526
+  and consolidated on the fused single-job design. Submitted a second copy of
+  the fused smoke to **`capacity`** (7197574, `exp_name=polaris_3model_fused_cap`;
+  the queue showed 9 running / 6 queued, 1 running job per project, ≤4 nodes,
+  no preemption) alongside the preemptable copy (7197528) — whichever starts
+  first closes the rung, the other gets `qdel`'d, and capacity is the planned
+  home for the production run regardless.
+- **2026-06-12 — Rungs 3+4 Successful: fused 27-combo smoke (7197574,
+  capacity).** The capacity copy started **one minute** after submission
+  (versus 3.4–7 h queue skews on preemptable all day). All three servers came
+  up on their own nodes via `mpiexec --hosts` and answered `ping_servers` in
+  **361 s** (rung 3: 3/3 ready, three `<jobtag>_<model_key>.json` files in the
+  fused `SERVERS_DIR`); the experiment then ran **all 27 role combinations**
+  (1 seed × 1 episode), `run.py` rc=0, and
+  `results/polaris_3model_fused_cap/experiment_summary.csv` holds exactly the
+  27 unique (encoder, decoder, interceptor) triples (verified
+  programmatically) with per-combo game dirs written incrementally as games
+  finished (rung 4). Whole job: 25 min. The preemptable duplicate (7197528)
+  was qdel'd unrun. The two-stage Qwen3 thinking pattern is visible working in
+  the server logs (prefilled `</think>` + answer call). Production sizing
+  note: 27 games completed in ~19 min of game time; the runner spawns one
+  process per game, so the production seed count is bounded by the experiment
+  node's `pids.max=4096` — added `OMP_NUM_THREADS=1` to the fused experiment
+  node and chose 15 seeds (405 games / 405 processes) for rung 5.
 - **2026-06-12 — Derived the TP plan from staged `config.json` files** (see the
   staged-models table): Qwen3-8B/-4B have 32 attention / 8 KV heads → TP=1
   (single 40 GB card holds 16/8 GB of weights with ample KV headroom);

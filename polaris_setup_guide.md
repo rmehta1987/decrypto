@@ -259,23 +259,39 @@ Per-GPU weights ≈ `2 × params / TP` bytes (bf16); TP must divide both
   port for the second server) would drop it to 3 — deferred until the simple
   layout is proven.
 
-### Launching
+### Launching — use the FUSED single job (the proven path)
 
 ```bash
-# 27-game orchestration smoke (1 seed × 1 episode), short walltimes:
-SERVER_WALLTIME=02:00:00 EXP_WALLTIME=01:30:00 bash slurm/launch_servers_polaris.sh
+# 27-game orchestration smoke (1 seed × 1 episode), one 4-node job:
+qsub slurm/fused_3model_polaris.pbs
 
-# production run (e.g. 5 seeds), 8–16 h, servers outlive the experiment:
-SERVER_WALLTIME=17:00:00 EXP_WALLTIME=16:00:00 SEEDS="0 1 2 3 4" \
-  bash slurm/launch_servers_polaris.sh
+# production run (15 seeds = 405 games), capacity queue (no preemption, ≤168 h):
+qsub -q capacity -l walltime=16:00:00 \
+  -v EXP_NAME=polaris_3model,SEEDS="0 1 2 3 4 5 6 7 8 9 10 11 12 13 14" \
+  slurm/fused_3model_polaris.pbs
 ```
 
-The launcher submits one `server_vllm_polaris.pbs` per model (with its TP,
-`GPU_MEM_UTIL`, `MAX_MODEL_LEN`, `HEALTH_TIMEOUT`) on `-q preemptable -r y`,
-then the dependent `run_exp_polaris.pbs`. The experiment polls
-`python -m slurm.ping_servers` until all `EXPECTED_MODELS` answer, runs
-`run.py --config-name=$CONFIG_NAME exp_name=$EXP_NAME`, and `qdel`s the servers
-when done. Results land in `results/<EXP_NAME>/experiment_summary.csv`.
+`fused_3model_polaris.pbs` takes **one 4-node job**: node 0 runs the experiment
+(CPU/HTTP only), nodes 1–3 each run one `vllm serve` via `mpiexec --hosts`
+(per-node bootstrap `slurm/start_vllm_server_node.sh`, same staging/proxy/
+discovery logic as the proven server job). One queue wait, no inter-job skew,
+atomic lifetime; job 7197574 validated it end-to-end (3 servers ready in 361 s,
+all 27 combos, 25 min total).
+
+- **Did not work — the two-job dependent pattern on a contended queue.** The
+  launcher (`launch_servers_polaris.sh` + `run_exp_polaris.pbs`) is kept and
+  works mechanically, but on the busy `preemptable` queue the server jobs and
+  the experiment job are scheduled **independently**: in the 2026-06-12
+  attempts the servers started 3–7 h before the experiment could get a node and
+  **died at exactly their walltime while idle** (jobs 7197359/7197380/7197381,
+  `Exit_status=-29`). `-W depend=after:` orders starts; it does not co-schedule.
+  If you must use the two-job form, set server walltime ≫ experiment walltime +
+  worst-case queue skew (hours), and accept the idle-node waste.
+- **Did not work — recovering a mid-run preempted server.** `-r y` does requeue
+  a preempted server (observed: run_count=2), but the rerun registers a **new**
+  HSN address, and the runner reads server URLs **once at startup** — so a
+  preemption mid-experiment permanently breaks that model's games. This is why
+  the production run belongs on `capacity` (no preemption), not `preemptable`.
 
 - **How discovery works (no `qstat` parsing).** PBS job names can't carry
   `model_key:port`, so each server job writes its own
@@ -310,21 +326,24 @@ when done. Results land in `results/<EXP_NAME>/experiment_summary.csv`.
 ## Running a longer session
 
 The orchestration smoke is 27 games (1 seed × 1 episode). A production run
-scales seeds/episodes, the wall clock, and must survive preemption.
+scales seeds/episodes and the wall clock.
 
-- **Scale via the launcher env knobs**, not config edits: `SEEDS="0 1 2 3 4"`
-  widens `env_seed` (27 combos × 5 seeds = 135 games), `NUM_EPISODES=N` repeats
-  each combo×seed. Total games = 27 × |seeds| × episodes — mind the blow-up and
-  note the count you ran.
-- **Walltimes:** `EXP_WALLTIME` 8–16 h for the real workload, `SERVER_WALLTIME`
-  **≥ experiment walltime + queue skew** so no server dies mid-game; both well
-  under preemptable's 72 h cap.
-- **Preemption:** the launcher submits everything with `-r y`, so a preempted
-  job reruns. Per-game results are written incrementally under
-  `results/<EXP_NAME>/` as games finish (the summary CSV is written at the end),
-  so a preemption loses at most in-flight games, not the whole matrix — but a
-  rerun experiment job restarts the matrix; treat preempted production runs as
-  restarts and prefer off-peak windows.
+- **Scale via env knobs**, not config edits: `SEEDS="0 1 2 ..."` widens
+  `env_seed` (27 combos × |seeds| games at `num_episodes: 1`), `NUM_EPISODES=N`
+  repeats each combo×seed. Mind the blow-up and note the count you ran.
+- **Mind `pids.max=4096` when scaling seeds.** The runner spawns **one process
+  per game** (`ProcessPoolExecutor(max_workers=total games)`); the fused script
+  sets `OMP_NUM_THREADS=1` on the experiment node so 405 game processes
+  (15 seeds) stay well under the per-job cgroup cap. Hundreds more seeds would
+  need batching, not just a bigger walltime.
+- **Queue: `capacity` for production.** No preemption, ≤168 h, 1–4 nodes — the
+  fused 4-node job fits exactly, and it started within a minute on 2026-06-12
+  while preemptable 1-node jobs waited 3–7 h. Walltime is an upper bound; the
+  job exits when the matrix completes.
+- **Recoverability:** per-game result dirs land incrementally under
+  `results/<EXP_NAME>/` as games finish (the summary CSV is written at the
+  end), so a walltime kill loses only in-flight games; a rerun restarts the
+  matrix.
 - **Gotcha — `prod` won't take a single-node job.** It's a routing queue with a
   **10-node-per-job minimum**; only reach for it if you genuinely run ≥10-node
   jobs.
