@@ -1,42 +1,48 @@
 # Running Decrypto's self-hosted vLLM pipeline on ALCF Polaris (PBS)
 
-Living document. It explains how to stand up and run the **Decrypto self-hosted
-vLLM serving pipeline** on ALCF **Polaris** (PBS Pro), and records the changes
-needed to port the working RCC **Midway** (Slurm) version. It is the PBS
-equivalent of [`midway_notes.md`](midway_notes.md) — read that first for the
-Slurm template and the load-bearing fixes.
+Living document — the lab notebook for the **Decrypto self-hosted vLLM serving
+pipeline** on ALCF **Polaris** (PBS Pro). It records the cluster facts, the port
+from the RCC **Midway** (Slurm) version, the scale-up to three-model cross-play,
+and every decision and job outcome along the way. The step-by-step recipe lives
+in [`polaris_setup_guide.md`](polaris_setup_guide.md); the Slurm template and its
+load-bearing fixes are in [`midway_notes.md`](midway_notes.md).
 
-> **Scope:** self-hosted serving only — submit a job that runs `vllm serve` on a
-> Polaris A100 node, then a second job runs the Decrypto game loop against it
-> over HTTP. This is **NOT** the ALCF inference-*gateway* path
-> (`midway_alcf_inference_notes.md` / `argonne_polaris.yaml` / `inference_auth_token.py`),
-> which makes HTTPS calls to models ALCF already hosts and is blocked on Globus.
+> **Scope:** self-hosted serving only — submit a job that runs `vllm serve` on
+> Polaris A100 nodes, then a second job runs the Decrypto game loop against it
+> over HTTP. This is **not** the ALCF inference-*gateway* path (Globus-authed
+> HTTPS calls to models ALCF already hosts); that work lives on the
+> `alcf-inference-gateway` branch (`midway_alcf_inference_notes.md`,
+> `config/examples/argonne_polaris.yaml`, `src/utils/inference_auth_token.py`)
+> and none of those files exist on this branch.
 >
 > The proven Polaris cluster facts and the gotcha log come from a sibling project
-> on this same allocation: **`../MARSHAL/polaris_pbs_notes.md`** (treat its
-> cluster-facts table as ground truth). MARSHAL is a *training* pipeline; only its
-> **cluster-level** facts apply to us (we serve/infer, no Ray/DeepSpeed/weight-sync).
-
-If you just want to run the smoke test, jump to [Running a smoke test](#running-a-smoke-test).
-If something breaks, the [Decisions / changes log](#decisions--changes-log) at the
-bottom captures what we hit and how we fixed it.
+> on this same allocation: **`../MARSHAL/polaris_pbs_notes.md`** (path verified to
+> resolve, 2026-06-12). MARSHAL is a *training* pipeline; only its
+> **cluster-level** facts apply here (we serve/infer; no Ray/DeepSpeed/weight-sync).
 
 ---
 
-## ▶ STATUS: <!--STATUS-->GREEN ✅ (2026-06-07) — self-hosted vLLM pipeline proven end-to-end on Polaris<!--/STATUS-->
+## Status (2026-06-12)
 
-The Decrypto self-play smoke closed end-to-end on a Polaris A100 (single-job jid
-**7186966**, node `x3106c0s13b0n0`): venv staged from tarball (12 s) → `vllm serve`
-healthy (21 s) → registered via `DECRYPTO_SERVERS_FILE` with its HSN IP →
-`ping_servers` got a healthy reply over `http://10.201.3.1:8159/v1` (0.55 s) →
-`run.py` discovered the server and ran **1/1** self-play episodes →
-`results/polaris_smoke/experiment_summary.csv` written → vLLM stopped;
-`Exit_status=0`. (Gameplay itself is garbage — Qwen2.5-0.5B fails the JSON-format
-retries — a model-capacity issue, **not** a pipeline issue, exactly as Midway
-documented.)
+- **Single-model pipeline: proven end-to-end.** The Qwen2.5-0.5B self-play smoke
+  closed on a Polaris A100 (single-job 7186966, node `x3106c0s13b0n0`): venv
+  staged from tarball (12 s), `vllm serve` healthy (21 s), discovery via
+  `DECRYPTO_SERVERS_FILE` with the HSN IP, `ping_servers` healthy over
+  `http://10.201.3.1:8159/v1` (0.55 s), 1/1 self-play episodes,
+  `results/polaris_smoke/experiment_summary.csv` written, `Exit_status=0`
+  (`logs/paper/polaris_smoke_7186966.log`). Gameplay quality at 0.5B is poor
+  (JSON-format retries fail) — a model-capacity issue, not a pipeline issue,
+  matching the Midway result.
+- **Three-model scale-up: in progress.** Target experiment: full cross-play of
+  Llama-3.1-70B-Instruct + Qwen3-8B + Qwen3-4B (27 encoder×decoder×interceptor
+  combinations per env seed; config `config/examples/local_polaris_3model.yaml`).
+  Qwen3-8B and Qwen3-4B are staged and probe Successful at TP=1 (job 7197265).
+  Llama-3.1-70B staging is blocked on a Hugging Face token for the gated repo
+  (401 `GatedRepoError` recorded 2026-06-12); the TP=4 plan below is derived and
+  awaiting on-cluster verification.
 
 ```bash
-# Reproduce (debug queue):
+# Reproduce the proven single-model smoke (debug queue):
 cd /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto
 qsub slurm/probe_vllm_polaris.pbs   # prove the toolchain first
 qsub slurm/smoke_polaris.pbs        # server + 1 episode + results, one node
@@ -46,27 +52,39 @@ qsub slurm/smoke_polaris.pbs        # server + 1 episode + results, one node
 
 ## Cluster facts (Polaris / ALCF)
 
-Confirmed on this allocation (June 2026); cross-checked against MARSHAL's bring-up.
+Confirmed on this allocation (June 2026); cross-checked against MARSHAL's
+bring-up and the [ALCF Polaris docs](https://docs.alcf.anl.gov/polaris/)
+(re-verified 2026-06-12).
 
 | Item | Value |
 |---|---|
-| Scheduler | **PBS Pro** (`qsub`/`qstat`/`qdel`), login host `polaris-login-04` |
-| Account (`-A`) | **`lighthouse-uchicago`** ⚠️ NOT "Uchicago-lighthouse" (PBS rejects that). Confirmed via `sbank-list-allocations`: alloc 12374, ~17,175 node-h available |
-| Queue (`-q`) | **`debug`** (1–2 nodes, ≤1 h walltime) for the smoke. Also `debug-scaling`, `prod` |
-| GPU | **4× NVIDIA A100 40 GB** (HBM2, sm_80) per node. ⚠️ far tighter than Midway's H200 (~140 GB) |
-| CPU / RAM | AMD EPYC Milan, 64 hardware threads (`ncpus=64`), 512 GiB |
-| Filesystems | `home`, `eagle`, `grand`. Jobs **must** declare `-l filesystems=home:eagle` or PBS rejects them |
-| Select line | `-l select=1:ncpus=64:ngpus=4` (do **NOT** add `:system=polaris`) |
+| Scheduler | **PBS Pro** (`qsub`/`qstat`/`qdel`), login hosts `polaris-login-01..04` |
+| Account (`-A`) | **`lighthouse-uchicago`** — NOT "Uchicago-lighthouse" (PBS rejects that). Confirmed via `sbank-list-allocations`: alloc 12374, ~17,175 node-h available (2026-06-07) |
+| GPU | **4× NVIDIA A100-SXM4-40GB** (sm_80, NVLink) per node. Re-confirmed 2026-06-12 on node `x3005c0s31b1n0` via `nvidia-smi` (40960 MiB/GPU, `logs/probe_nvidia-smi_7197265.txt`) and the [compute-nodes doc](https://docs.alcf.anl.gov/polaris/#polaris-compute-nodes) (160 GiB HBM2 per node). Polaris has no 80 GB A100 partition |
+| CPU / RAM | AMD EPYC Milan 7543P, 64 hardware threads (`ncpus=64`), 512 GiB |
+| Filesystems | `home`, `eagle`. Jobs **must** declare `-l filesystems=home:eagle` or PBS rejects them |
+| Select line | `-l select=1:ncpus=64:ngpus=4` (do **not** add `:system=polaris`) |
 | Node-local scratch | `/local/scratch` (RAID0 SSD) — fast + writable; used for `TMPDIR` + venv staging. Falls back to `/tmp` |
-| Conda module | `module use /soft/modulefiles && module load conda/2025-09-25 && conda activate base` (build the venv on top) |
-| Native CUDA | `/soft/compilers/cudatoolkit/cuda-12.4.1`; driver supports ≥ CUDA 12.8 → cu124 wheels are safe |
+| Conda module | `module use /soft/modulefiles && module load conda/2025-09-25 && conda activate base` (venv built on top) |
+| Native CUDA | `/soft/compilers/cudatoolkit/cuda-12.4.1`; driver 570.124.06 supports CUDA 12.8 → cu124 wheels are safe |
 | Member base | `/lus/eagle/projects/lighthouse-uchicago/members/mehta5` (repo, venv, models, caches) |
 | Project root | `…/members/mehta5/decrypto` |
-| Model store | `…/members/mehta5/models/` (`Qwen2.5-0.5B-Instruct` staged) |
+| Model store | `…/members/mehta5/models/` — see the staged-models table below |
 | Serving venv | `…/members/mehta5/conda-envs/decrypto-serve` (+ tarball `…/members/mehta5/decrypto-serve-venv.tar`) |
 | Caches | `…/members/mehta5/{hf_cache,triton_cache,torchinductor_cache}` |
 | Job ids | `1234567.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov`; bare tag via `${PBS_JOBID%%.*}` |
 | Cross-node (HSN) | compute nodes `x3001c0s7b1n0`; HSN IPs `10.201.x.x`; FQDN `<node>.hsn.cm.polaris.alcf.anl.gov` |
+
+### Queues (verified with `qstat -Qf <queue>` on 2026-06-12, cross-checked against the [running-jobs docs](https://docs.alcf.anl.gov/polaris/running-jobs/))
+
+| Queue | Nodes/job | Walltime | Concurrency limits (`qstat -Qf`) | Fit for this pipeline |
+|---|---|---|---|---|
+| `debug` | 1–2 | 5 min – 1 h | `max_run=[u:1]`, `queued_jobs_threshold=[u:1]` | probes + single-job smokes only; cannot host the multi-job pattern |
+| `debug-scaling` | 1–10 | 5 min – 1 h | 1 job/user | single-job only |
+| `prod` (routing) | **10–496** | ≤ 24 h | 10 running/project | rejects 1-node jobs; not usable here |
+| `preemptable` | 1–10 | ≤ **72 h** | `max_run=[p:10]`, `max_queued=[u:20]` | **the multi-job long-run queue** (3 servers + 1 experiment = 4 concurrent jobs). Jobs can be preempted by `demand` work without warning — submit with `-r y` and write results incrementally |
+| `capacity` | 1–4 | ≤ 168 h | 1 running/user | single-job only; fallback for a no-preemption long run if servers + experiment are fused into one multi-node job (heavier script change; not implemented) |
+| `demand` | 1–56 | ≤ 1 h | by request only | not applicable |
 
 ### PBS submit idiom (single GPU node)
 
@@ -74,18 +92,48 @@ Confirmed on this allocation (June 2026); cross-checked against MARSHAL's bring-
 qsub -A lighthouse-uchicago -q debug \
      -l select=1:ncpus=64:ngpus=4 -l filesystems=home:eagle \
      -l walltime=01:00:00 slurm/<script>.pbs
-# (these are baked into each script's #PBS header)
+# (these are baked into each script's #PBS header; the launcher overrides
+#  queue/walltime at submit time with `qsub -q ... -l walltime=... -r y`)
 ```
+
+---
+
+## Staged models and the tensor-parallel plan
+
+Compute nodes are offline; every model is pre-downloaded on a login node into
+`$BASE/models/` and served by **local path** (the config's `model_id` equals the
+path, because that is the name vLLM serves under).
+
+Per-GPU weight footprint ≈ `2 × params / TP` bytes (bf16). TP must divide both
+`num_attention_heads` and `num_key_value_heads` (GQA) — head counts below were
+read from each staged model's `config.json`, not from memory. KV-cache figures
+are the vLLM startup log's own report, captured per job.
+
+| Model (`model_key`) | HF repo | Disk | Heads (attn/KV) | TP | ≈ weights/GPU | Verification |
+|---|---|---|---|---|---|---|
+| `qwen3_8b` | `Qwen/Qwen3-8B` | 16 GB (5 shards) | 32 / 8 | 1 | ~16 GB | Successful — job 7197265: loaded at TP=1, mem_util 0.90, max_len 8192; KV cache 133,312 tokens (16.27× concurrency); generated (`logs/probe_wrap_7197265.log`) |
+| `qwen3_4b` | `Qwen/Qwen3-4B` | 7.5 GB (3 shards) | 32 / 8 | 1 | ~8 GB | Successful — job 7197265: KV cache 189,648 tokens (23.15×); generated |
+| `llama3.1_70B` | `meta-llama/Meta-Llama-3.1-70B-Instruct` (gated) | ~141 GB expected | 64 / 8 expected — to be read from staged `config.json` | **4** | ~35 GB | Pending — staging blocked on HF token (401 GatedRepoError, 2026-06-12). TP=4 is the only single-node fit on 40 GB cards; headroom for KV is ~1–4 GB/GPU at mem_util 0.92, so expect a small KV cache and lower `--max-model-len` (8192 → 4096 → 2048) if the engine OOMs on load |
+| `qwen2.5_0.5B` | `Qwen/Qwen2.5-0.5B-Instruct` | 954 MB | 14 / 2 | 1 | ~1 GB | Successful — probe 7186959 and smoke 7186966 (the original port) |
+
+- Multi-node tensor/pipeline parallelism (Ray spanning nodes) is explicitly out
+  of scope; 70B must fit one 4-GPU node at TP=4.
+- Co-locating the two small models on one node (TP=1 each, `CUDA_VISIBLE_DEVICES`
+  pinning + distinct ports) would save one node-job but is deferred until the
+  one-model-per-node-job layout is proven; the current
+  `server_vllm_polaris.pbs` runs one model per job.
+- Disk check before the 70B pull: eagle reported 1.3 TB free (`df -h`,
+  2026-06-12), comfortably above the ~141 GB needed.
 
 ---
 
 ## One-time setup
 
-Done once per account; on a **login node** (has internet + HF reachability).
+Done once per account, on a **login node** (has internet + HF reachability).
 
 1. **Build the serving venv + tarball.** The stack mirrors MARSHAL's proven cu124
-   set and adds the Decrypto runner deps, so **one env hosts both** the `vllm
-   serve` server and the HTTP-only game runner:
+   set and adds the Decrypto runner deps, so **one env hosts both** the
+   `vllm serve` server and the HTTP-only game runner:
 
    ```
    torch 2.6.0+cu124 · vllm 0.8.4 · transformers 4.51.2 · tokenizers <0.22 · numpy <2
@@ -104,20 +152,27 @@ Done once per account; on a **login node** (has internet + HF reachability).
    (~12 s) and runs from there.
 
 2. **Pre-download every model** you plan to serve into the model store
-   (compute nodes are **offline**). The smoke model is staged at
-   `…/members/mehta5/models/Qwen2.5-0.5B-Instruct`. To add another:
+   (compute nodes are **offline**):
 
    ```bash
    # on a login node, in the decrypto-serve venv:
-   huggingface-cli download Qwen/Qwen2.5-72B-Instruct \
-     --local-dir /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen2.5-72B-Instruct
+   huggingface-cli download Qwen/Qwen3-8B --local-dir $BASE/models/Qwen3-8B
+   huggingface-cli download Qwen/Qwen3-4B --local-dir $BASE/models/Qwen3-4B
+   # gated — requires an accepted Meta license + HF_TOKEN on this machine:
+   huggingface-cli download meta-llama/Meta-Llama-3.1-70B-Instruct \
+     --local-dir $BASE/models/Meta-Llama-3.1-70B-Instruct
    ```
+
+   After each download, verify completeness — a truncated pull is a classic
+   silent failure: `config.json` present, `model.safetensors.index.json` present,
+   and every shard in the index's `weight_map` exists on disk (verified for
+   Qwen3-8B and Qwen3-4B on 2026-06-12).
 
 ---
 
 ## Running a smoke test
 
-> **⚠️ Which path to use — the `debug` queue forces a single job.** `debug`
+> **Which path to use — the `debug` queue forces a single job.** `debug`
 > enforces **`max_run=1`** and **`queued_jobs_threshold=1`** per user
 > (`qstat -Qf debug`). The faithful Midway-style **two-job** pattern (a server job
 > + a dependent experiment job) therefore **cannot run on debug**: the two jobs
@@ -125,12 +180,15 @@ Done once per account; on a **login node** (has internet + HF reachability).
 > would deadlock. So:
 > - **On `debug` (the smoke):** use the **single-job** `slurm/smoke_polaris.pbs`
 >   (server + experiment in one job, one node).
-> - **On a queue allowing ≥2 concurrent jobs** (prod / a reservation): use the
+> - **On a queue allowing ≥2 concurrent jobs** (`preemptable`): use the
 >   **two-job** `slurm/launch_servers_polaris.sh` (multi-node, multi-model).
 
 **Always run the probe first:** `qsub slurm/probe_vllm_polaris.pbs` proves the
-toolchain (nvidia-smi → torch sees the A100 → vLLM loads the 0.5B and generates).
-Don't run the smoke until the probe is green.
+toolchain (nvidia-smi → torch sees the A100 → vLLM loads and generates). The
+probe now accepts a multi-model spec, e.g.
+`qsub -v MODEL_SPECS="$BASE/models/Qwen3-8B:1:0.90:8192;$BASE/models/Qwen3-4B:1:0.90:8192" slurm/probe_vllm_polaris.pbs`
+(entries are `path:tp:mem_util:max_len`, semicolon-separated because `qsub -v`
+splits on commas). Do not run a smoke until the probe passes.
 
 ### Single-job smoke (debug)
 
@@ -145,26 +203,24 @@ It starts `vllm serve` in the background, waits for health, registers it via
 episode, writes `results/polaris_smoke/experiment_summary.csv`, then stops vLLM.
 Override the model with `qsub -v MODEL_KEY=...,MODEL_PATH=...,TP=... slurm/smoke_polaris.pbs`.
 
-### Two-job launcher (prod / reservation, multi-node)
+### Two-job launcher (preemptable, multi-node, multi-model)
 
-1. **Pick the model.** Edit the `models` / `ngpus` arrays near the top of
-   `slurm/launch_servers_polaris.sh` (`"model_key:model_path"`; `ngpus` = TP size):
-
-   ```bash
-   models=( "qwen2.5_0.5B:$BASE/models/Qwen2.5-0.5B-Instruct" )
-   ngpus=(1)
-   ```
-
-2. **Point the config at the same model.** In `config/examples/local_polaris.yaml`,
-   keep `fixed_interceptor`, `models[].model_key`, and `models[].model_id`
-   consistent. `model_id` must equal the name vLLM serves under — we serve under
-   the **local path**, so `model_id` = the path.
-
-3. **Submit** `bash slurm/launch_servers_polaris.sh` from the repo root. It prints
-   each server job id + port, the per-launch `SERVERS_DIR`, and the dependent
-   experiment job id, then the experiment job waits for health, runs the games,
-   writes `results/polaris_smoke/experiment_summary.csv`, and `qdel`s the servers.
-   (On debug it will refuse and tell you to use `smoke_polaris.pbs`.)
+1. The `models` / `ngpus` / `mem_utils` / `max_lens` arrays at the top of
+   `slurm/launch_servers_polaris.sh` define the served set — currently the three
+   cross-play models at TP 4/1/1. Queue, walltimes, config name, seeds and
+   episode count are env knobs (`QUEUE`, `SERVER_WALLTIME`, `EXP_WALLTIME`,
+   `CONFIG_NAME`, `EXP_NAME`, `SEEDS`, `NUM_EPISODES`, `HEALTH_TIMEOUT`,
+   `WAIT_TIMEOUT`).
+2. `config/examples/local_polaris_3model.yaml` must stay consistent:
+   `models[].model_key` matches what each server job registers, and
+   `models[].model_id` equals the served **local path**.
+3. **Submit** `bash slurm/launch_servers_polaris.sh` from the repo root. It
+   prints each server job id + port, the per-launch `SERVERS_DIR`, and the
+   dependent experiment job id; the experiment job waits for all
+   `EXPECTED_MODELS` servers to answer `ping_servers`, runs the games, writes
+   `results/<EXP_NAME>/experiment_summary.csv`, and `qdel`s the servers.
+   (On debug the dependent submit is rejected; the launcher then `qdel`s its own
+   server jobs and points you at `smoke_polaris.pbs`.)
 
 ---
 
@@ -198,10 +254,16 @@ Rather than edit the Midway scripts in place, we wrote PBS-flavored copies
   (the `vllm` console script's shebang hardcodes the eagle build path and would
   bypass the relocated python).
 - **Paths.** All `/project/rcc/mehta5/...` → `/lus/eagle/projects/lighthouse-uchicago/members/mehta5/...`.
+  This includes the legacy `agent_paths` table in `src/utils/server.py`
+  (2026-06-12): the staged keys (`llama3.1_70B`, `qwen3_8b`, `qwen3_4b`,
+  `qwen2.5_0.5B`) now point at `$BASE/models/...`; that table is read only by the
+  Slurm `squeue` branch (on Polaris, `model_id` travels inside each server's
+  discovery JSON), but stale Midway paths were fixed so no dead pointers remain.
 - **Offline + caches.** `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`, `HF_HOME` on
   eagle, serve a **local model path** — compute nodes have no internet.
-- **GPU memory.** A100 40 GB vs H200 140 GB: start small (Qwen2.5-0.5B, TP=1) and
-  tune `--gpu-memory-utilization` when scaling to 70B (TP=4).
+- **GPU memory.** A100 40 GB vs H200 140 GB: the 0.5B proved the pipeline at
+  TP=1; the 70B-class target requires TP=4 across the whole node (see the
+  tensor-parallel plan above).
 
 ---
 
@@ -210,13 +272,14 @@ Rather than edit the Midway scripts in place, we wrote PBS-flavored copies
 | File | Role |
 |---|---|
 | `slurm/build_decrypto_serve_venv.sh` | one-time: build the serving venv + tarball on a login node |
-| `slurm/probe_vllm_polaris.pbs` | single-GPU toolchain probe (run + pass first) |
+| `slurm/probe_vllm_polaris.pbs` | toolchain probe; multi-model `MODEL_SPECS` (`path:tp:mem:len;…`) |
 | `slurm/smoke_polaris.pbs` | **single-job** smoke (server + experiment, one node) — the `debug`-queue path |
-| `slurm/server_vllm_polaris.pbs` | per-model vLLM server job; registers itself via `DECRYPTO_SERVERS_FILE` (two-job path) |
-| `slurm/launch_servers_polaris.sh` | two-job `qsub` launcher: server job(s) + dependent experiment job (prod/reservation) |
-| `slurm/run_exp_polaris.pbs` | dependent experiment job: poll `ping_servers`, run `run.py`, `qdel` servers (two-job path) |
-| `config/examples/local_polaris.yaml` | self-play, 1 episode, `match_encoder_decoder`, one `LocalModel` |
-| `src/utils/server.py` | `DECRYPTO_SERVERS_FILE` may now be a dir of per-job JSON files (Slurm path intact) |
+| `slurm/server_vllm_polaris.pbs` | per-model vLLM server job; registers itself via `DECRYPTO_SERVERS_FILE`; `GPU_MEM_UTIL`/`MAX_MODEL_LEN`/`HEALTH_TIMEOUT` parameterized |
+| `slurm/launch_servers_polaris.sh` | two-job `qsub` launcher: N server jobs + dependent experiment job (preemptable) |
+| `slurm/run_exp_polaris.pbs` | dependent experiment job: poll `ping_servers`, run `run.py`, `qdel` servers; `CONFIG_NAME`/`EXP_NAME`/`SEEDS`/`NUM_EPISODES` parameterized |
+| `config/examples/local_polaris.yaml` | 0.5B self-play smoke config (proven; do not overwrite) |
+| `config/examples/local_polaris_3model.yaml` | 3-model cross-play config: 27 combos/seed, Qwen3 thinking budgets |
+| `src/utils/server.py` | `DECRYPTO_SERVERS_FILE` may be a dir of per-job JSON files (Slurm path intact); `agent_paths` localized to Polaris |
 
 ---
 
@@ -225,56 +288,66 @@ Rather than edit the Midway scripts in place, we wrote PBS-flavored copies
 - **`--enforce-eager` for the smoke** — skips `torch.compile`, avoiding the
   autotune-cache write that killed the engine on load at Midway.
 - **Scrub inherited `TMPDIR`** → set it under `/local/scratch/$USER_<jobtag>`.
-- **Do NOT `pip install -r requirements.txt`** — it pins torch 2.9 / vllm 0.13
+- **Do not `pip install -r requirements.txt`** — it pins torch 2.9 / vllm 0.13
   (unvalidated here). Use the proven cu124 set in `build_decrypto_serve_venv.sh`.
 - **`transformers<5` + `tokenizers<0.22`** — a fresh install pulls transformers 5,
   which dropped `all_special_tokens_extended` that vLLM 0.8.x calls.
 - **per-job cgroup `pids.max = 4096`** — bit MARSHAL's many-process Ray training
   hard, but `vllm serve` is light (one engine + one worker/GPU) and should fit. If
   you see `pthread_create … Resource temporarily unavailable`, cap the BLAS/OMP
-  thread family (`OMP_NUM_THREADS=8`, etc.).
+  thread family (`OMP_NUM_THREADS=8`, etc.). The same limit exists on login nodes
+  (`git grep` without `--threads=1` failed with the same error, 2026-06-12).
 - **Polaris prologue/filesystem flakiness** — jobs can sit 20–40 min from `R` to
   script start, or hang the whole walltime with 0-byte output during an ALCF
   incident. If a job is silent, check `pbsnodes -l` for offlined nodes before
   assuming your bug. Every script streams a live `…wrap.log` so you can watch.
-- **The ALCF proxy hangs in-cluster HTTP** (NEW, bit us at smoke jid 7186962).
-  Polaris **compute** nodes export `http_proxy=http://proxy.alcf.anl.gov:3128`
+- **The ALCF proxy hangs in-cluster HTTP** (bit us at smoke 7186962). Polaris
+  **compute** nodes export `http_proxy=http://proxy.alcf.anl.gov:3128`
   (via `/etc/sysconfig/proxy`) for outbound internet. `curl` AND the OpenAI/httpx
   client honor it, so a request to `localhost:<port>` or an HSN `10.201.x` address
   gets routed through the (air-gapped, unreachable) proxy and **hangs** — vLLM was
   up with `Application startup complete`, yet the health check timed out after
-  900s. **Fix:** in every job `unset http_proxy https_proxy HTTP_PROXY
+  900 s. **Fix:** in every job `unset http_proxy https_proxy HTTP_PROXY
   HTTPS_PROXY all_proxy …` and set `no_proxy` to cover `localhost,127.0.0.1,
   10.201.0.0/16,.hsn.cm.polaris.alcf.anl.gov` (we never need outbound — fully
-  offline). Health checks also use `curl --noproxy '*'` + a `urllib` ProxyHandler({})
-  fallback, and hit `127.0.0.1` (not `localhost`, to dodge an IPv6 `::1` detour).
+  offline). Health checks also use `curl --noproxy '*'` + a `urllib`
+  ProxyHandler({}) fallback, and hit `127.0.0.1` (not `localhost`, to dodge an
+  IPv6 `::1` detour).
+- **Qwen3 models think before answering.** Qwen3-8B/-4B emit `<think>` blocks; if
+  `max_tokens` is too small the model spends its whole budget thinking and never
+  produces the JSON the runner parses — format-retry failures that look like a
+  pipeline bug but are a token-budget issue. `LocalModel.max_reasoning_tokens`
+  (two-stage pattern in `src/agents/role_client.py`: thinking call capped at the
+  budget with `stop=</think>`, then an answer call that prefills `</think>`)
+  bounds this; the 3-model config sets `max_tokens: 2500`,
+  `max_reasoning_tokens: 2000`, following `config/paper/figure_4_tom_piaget.yaml`.
 
 ---
 
-## Results so far
+## Job ledger
 
-<!--RESULTS-->
-- **Probe (jid 7186959, x3106c0s19b1n0):** GREEN. torch saw the A100, vLLM 0.8.4
-  loaded Qwen2.5-0.5B (V1 engine) and generated. `Exit_status=0`.
-- **Smoke (jid 7186966, x3106c0s13b0n0):** GREEN. The full orchestration path
-  closed — `vllm serve` up → `DECRYPTO_SERVERS_FILE` discovery → `ping_servers`
-  healthy over the HSN IP (0.55 s) → `run.py` ran 1 episode → `experiment_summary.csv`
-  written → vLLM stopped. Episode: 2 turns, Eve intercepted, as expected for a
-  0.5B model that fails JSON-format retries (model capacity, not pipeline).
+Every log file under `logs/` mapped to its job and outcome (`logs/` is
+gitignored — enumerate with `ls logs/` / depth-limited `find logs -maxdepth 2`,
+never a cluster-wide `find`).
 
-The takeaway matches Midway: the orchestration path works on Polaris; real runs
-just need a larger model (scale to Qwen2.5-72B / Llama-3.1-70B at TP=4, tuning
-`--gpu-memory-utilization` for the 40 GB A100s — pre-stage the model first).
-<!--/RESULTS-->
+| Log file(s) | Job id | Queue | Model / TP | Outcome | Root cause / note |
+|---|---|---|---|---|---|
+| `logs/probe_wrap_7186959.log`, `logs/probe_nvidia-smi_7186959.txt`, `logs/7186959.*.OU/.ER` | 7186959 | debug | Qwen2.5-0.5B / TP1 | Successful | Toolchain probe: torch saw the A100, vLLM 0.8.4 loaded the 0.5B on V1 and generated; `Exit_status=0` |
+| `logs/vllm/qwen2.5_0.5B-7186960.wrap.log`, `logs/vllm/7186960.*.OU/.ER` | 7186960 | debug | Qwen2.5-0.5B / TP1 | Unsuccessful (aborted) | Orphaned two-job server; `qdel`'d because the dependent experiment job was rejected on debug (`max_run=1`/`queued=1`). Demonstrates the two-job pattern is invalid on debug |
+| `logs/vllm/qwen2.5_0.5B-7186962.out`, `logs/paper/polaris_smoke_7186962.log`, `logs/paper/7186962.*.OU/.ER` | 7186962 | debug | Qwen2.5-0.5B / TP1 | Unsuccessful | vLLM came up (`Application startup complete`) but the health check hit the ALCF `http_proxy` and hung → `vLLM not healthy in 900s` (`Exit_status=45`). Fixed by the proxy bypass |
+| `logs/vllm/qwen2.5_0.5B-7186966.out`, `logs/paper/polaris_smoke_7186966.log`, `logs/paper/7186966.*.OU/.ER` | 7186966 | debug | Qwen2.5-0.5B / TP1 | Successful | Full single-job orchestration: health in 21 s, discovery via HSN IP `10.201.3.1:8159`, `ping_servers` 0.55 s, 1 episode, `experiment_summary.csv` written; `Exit_status=0`. (Gameplay garbage = 0.5B model capacity, not pipeline) |
+| `logs/build/decrypto_serve_venv.log`, `logs/build/runner_import_check.log`, `logs/build/vllm_help_check.log` | n/a (login) | — | — | Successful | One-time serving-venv build + import/`vllm --help` sanity checks |
+| `logs/build/download_qwen3_8b.log`, `logs/build/download_qwen3_4b.log` | n/a (login) | — | Qwen3-8B, Qwen3-4B | Successful | Login-node `huggingface-cli download` (2026-06-12, ~3 min each); all shards + `model.safetensors.index.json` verified present |
+| `logs/probe_wrap_7197265.log`, `logs/probe_nvidia-smi_7197265.txt`, `logs/7197265.*.OU/.ER` | 7197265 | debug | Qwen3-8B / TP1 + Qwen3-4B / TP1 | Successful | Multi-model probe on `x3005c0s31b1n0` (~77 s): A100-SXM4-40GB confirmed (40960 MiB); Qwen3-8B KV cache 133,312 tokens (16.27× @ 8192), Qwen3-4B KV cache 189,648 tokens (23.15×); both generated; `Exit_status=0` |
 
 ---
 
 ## Decisions / changes log
 
-- **2026-06-07 — Orientation.** Confirmed Polaris login (`polaris-login-04`, PBS).
-  Verified account **`lighthouse-uchicago`** (`sbank`: alloc 12374, ~17,175
-  node-h), `debug` queue present. Confirmed the **self-hosted serving** task (NOT
-  the Globus inference gateway). Read the Midway trio + `src/utils/server.py` and
+- **2026-06-07 — Orientation.** Confirmed Polaris login (PBS Pro). Verified
+  account **`lighthouse-uchicago`** (`sbank`: alloc 12374, ~17,175 node-h),
+  `debug` queue present. Confirmed the **self-hosted serving** task (NOT the
+  Globus inference gateway). Read the Midway trio + `src/utils/server.py` and
   MARSHAL's `polaris_pbs_notes.md` (proven cluster facts + the venv-on-Lustre /
   air-gapped-compute / pids.max gotchas).
 - **2026-06-07 — Env strategy.** The runner imports `anthropic` + `litellm`
@@ -301,7 +374,7 @@ just need a larger model (scale to Qwen2.5-72B / Llama-3.1-70B at TP=4, tuning
   (`--model/--host/--port/-tp/--gpu-memory-utilization/--max-model-len/
   --enforce-eager/--trust-remote-code/--disable-log-stats`). All scripts pass
   `bash -n`.
-- **2026-06-07 — Probe GREEN (jid 7186959, node x3106c0s19b1n0).** ~80 min queue
+- **2026-06-07 — Probe Successful (7186959, node x3106c0s19b1n0).** ~80 min queue
   wait (debug contention), then ran in ~1 min: torch saw the A100 (driver
   570.124.06 / CUDA 12.8), vLLM 0.8.4 loaded Qwen2.5-0.5B on the **V1 engine**
   (Flash Attention, KV cache 782k tokens) and generated text; `Exit_status=0`.
@@ -314,8 +387,8 @@ just need a larger model (scale to Qwen2.5-72B / Llama-3.1-70B at TP=4, tuning
   `<node>.hsn.cm.polaris.alcf.anl.gov` resolves to `10.201.x.x` (dual HSN NICs);
   the server registers that IP and binds `0.0.0.0`, so the experiment job on a
   different node can reach it.
-- **2026-06-07 — BLOCKER: the two-job dependent pattern can't run on `debug`.**
-  `bash slurm/launch_servers_polaris.sh` submitted the server (jid 7186960) but
+- **2026-06-07 — Blocker: the two-job dependent pattern can't run on `debug`.**
+  `bash slurm/launch_servers_polaris.sh` submitted the server (7186960) but
   PBS rejected the dependent experiment job: `would exceed queue generic's
   per-user limit of jobs in 'Q' state`. `qstat -Qf debug`:
   **`max_run=[u:PBS_GENERIC=1]`** and **`queued_jobs_threshold=[u:PBS_GENERIC=1]`**
@@ -329,23 +402,58 @@ just need a larger model (scale to Qwen2.5-72B / Llama-3.1-70B at TP=4, tuning
   `nodect=2`, so a single 2-node job could host server+exp on separate nodes — a
   future option if literal cross-node routing must be exercised on debug.)
 - **2026-06-07 — Submitted single-job smoke** `qsub slurm/smoke_polaris.pbs`
-  (jid 7186962, debug).
-- **2026-06-07 — Smoke 7186962 FAILED: ALCF proxy hangs the health check (not a
-  vLLM problem).** Started immediately on x3106c0s19b1n0; venv staged in 9s, but
-  `vLLM not healthy in 900s` (Exit_status 45). The vLLM server log showed it came
-  up cleanly in ~30s (`Application startup complete`, API on `http://0.0.0.0:8305`,
-  `/health` route live) — so the **health check** was wrong, not vLLM. Root cause:
-  compute nodes set `http_proxy=proxy.alcf.anl.gov:3128`, so `curl localhost:8305`
-  routed through the unreachable proxy. **Fix:** unset all proxy vars + set
-  `no_proxy` in every job; proxy-immune health check (`curl --noproxy '*'` + urllib
-  ProxyHandler({}), hitting 127.0.0.1) with a one-time proxy/socket diagnostic.
-  Resubmitted as jid **7186966**.
-- **2026-06-07 — SMOKE GREEN (jid 7186966, node x3106c0s13b0n0).** With the proxy
+  (7186962, debug).
+- **2026-06-07 — Smoke 7186962 Unsuccessful: ALCF proxy hangs the health check
+  (not a vLLM problem).** Started immediately on x3106c0s19b1n0; venv staged in
+  9 s, but `vLLM not healthy in 900s` (Exit_status 45). The vLLM server log showed
+  it came up cleanly in ~30 s (`Application startup complete`, API on
+  `http://0.0.0.0:8305`, `/health` route live) — so the **health check** was
+  wrong, not vLLM. Root cause: compute nodes set
+  `http_proxy=proxy.alcf.anl.gov:3128`, so `curl localhost:8305` routed through
+  the unreachable proxy. **Fix:** unset all proxy vars + set `no_proxy` in every
+  job; proxy-immune health check (`curl --noproxy '*'` + urllib ProxyHandler({}),
+  hitting 127.0.0.1) with a one-time proxy/socket diagnostic. Resubmitted as
+  **7186966**.
+- **2026-06-07 — Smoke Successful (7186966, node x3106c0s13b0n0).** With the proxy
   bypass: venv staged in 12 s, vLLM healthy in **21 s**, server registered with its
   HSN IP `http://10.201.3.1:8159/v1`, `ping_servers` got a healthy reply in 0.55 s
   (file-based discovery + real HTTP over the HSN NIC), `run.py +get_models_from_slurm=true`
   discovered the server and completed **1/1** episodes, wrote
-  `results/polaris_smoke/experiment_summary.csv`, and the cleanup trap stopped vLLM.
-  `Exit_status=0`. The 0.5B model's gameplay is garbage (JSON-retry failures) — a
-  model-capacity issue, not a pipeline one, matching Midway. **The self-hosted
+  `results/polaris_smoke/experiment_summary.csv`, and the cleanup trap stopped
+  vLLM. `Exit_status=0`. The 0.5B model's gameplay is poor (JSON-retry failures) —
+  a model-capacity issue, not a pipeline one, matching Midway. **The self-hosted
   vLLM serving pipeline is proven on Polaris.**
+- **2026-06-12 — Began the 3-model cross-play scale-up** (Llama-3.1-70B +
+  Qwen3-8B + Qwen3-4B, 27 combos/seed). Re-verified cluster facts: `qstat -Qf`
+  for `debug` (max_run 1/user) and `preemptable` (1–10 nodes, 72 h,
+  max_run 10/project, max_queued 20/user) match the ALCF running-jobs docs;
+  compute-nodes doc + on-node `nvidia-smi` (job 7197265) confirm 4× A100 40 GB —
+  no 80 GB partition, so the 70B TP plan is TP=4. Confirmed
+  `../MARSHAL/polaris_pbs_notes.md` resolves.
+- **2026-06-12 — Staged Qwen3-8B (16 GB) and Qwen3-4B (7.5 GB)** on a login node
+  (`logs/build/download_qwen3_{8b,4b}.log`); verified `config.json` + all shards
+  against each `model.safetensors.index.json`. **Llama-3.1-70B staging is blocked:**
+  the repo `meta-llama/Meta-Llama-3.1-70B-Instruct` is gated and no HF token
+  exists on this machine (`huggingface-cli whoami` → "Not logged in";
+  download attempt → 401 `GatedRepoError`, recorded). Waiting on a token with an
+  accepted Meta license.
+- **2026-06-12 — Derived the TP plan from staged `config.json` files** (see the
+  staged-models table): Qwen3-8B/-4B have 32 attention / 8 KV heads → TP=1
+  (single 40 GB card holds 16/8 GB of weights with ample KV headroom);
+  Llama-3.1-70B (64/8 heads expected) only fits a node at TP=4 (~35 GB
+  weights/GPU). Mitigation ladder for the expected-tight 70B KV cache:
+  `--max-model-len` 8192 → 4096 → 2048 and `--gpu-memory-utilization` up to 0.95.
+- **2026-06-12 — Multi-model probe Successful (7197265, x3005c0s31b1n0).**
+  Extended `probe_vllm_polaris.pbs` to take `MODEL_SPECS` (`path:tp:mem:len`,
+  semicolon-separated — `qsub -v` splits on commas, which cost one observation:
+  list-valued vars must avoid `,`). Qwen3-8B then Qwen3-4B each loaded at TP=1
+  with mem_util 0.90 / max_len 8192 and generated; KV caches 133,312 and 189,648
+  tokens respectively; whole job ~77 s including venv staging; `Exit_status=0`.
+- **2026-06-12 — Parameterized the serving scripts for the 3-model run** (commit
+  `31ce823`): per-model `GPU_MEM_UTIL`/`MAX_MODEL_LEN`/`HEALTH_TIMEOUT` on the
+  server job; `CONFIG_NAME`/`EXP_NAME`/`WAIT_TIMEOUT`/`SEEDS`/`NUM_EPISODES` on
+  the experiment job; launcher targets `preemptable` with `-r y` and
+  walltime flags at submit time (headers stay debug-sized defaults). Authored
+  `config/examples/local_polaris_3model.yaml`. Fixed the stale Midway
+  `agent_paths` in `src/utils/server.py` (legacy `squeue`-only table; dir-merge
+  loader re-verified with an ad-hoc unit test).
