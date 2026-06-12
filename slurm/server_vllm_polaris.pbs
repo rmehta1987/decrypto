@@ -37,10 +37,17 @@ VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
 : "${PORT:?qsub -v PORT=... required}"
 : "${TP:=1}"
 : "${SERVERS_DIR:?qsub -v SERVERS_DIR=... required}"
-# 70B at TP=4 on 40 GB cards: weights ~35 GB/GPU, so KV-cache headroom comes
-# from these two knobs (raise mem_util / lower max_len if the engine OOMs).
+# 72B at TP=4 on 40 GB cards: weights ~34 GiB/GPU, so KV-cache headroom comes
+# from these knobs. MAX_NUM_BATCHED_TOKENS caps the profiling/prefill batch —
+# without it the 8192-token activation peak left no memory for KV blocks at
+# all (probe 7197372). Chunked prefill (default on, V1) keeps long prompts
+# working.
 : "${GPU_MEM_UTIL:=0.90}"
 : "${MAX_MODEL_LEN:=8192}"
+: "${MAX_NUM_BATCHED_TOKENS:=}"
+# Caps scheduler slots; the profiling dummy-sampler's logits scale with this
+# (default 1024), which alone can eat >1 GiB on a 152k vocab.
+: "${MAX_NUM_SEQS:=}"
 # Cold-load time scales with weight bytes off Lustre: 0.5B was ~21 s; 70B is
 # minutes. Launcher passes a larger value for big models.
 : "${HEALTH_TIMEOUT:=900}"
@@ -113,7 +120,10 @@ trap cleanup EXIT TERM INT
 #    shebang hardcodes the eagle build path; the module form uses the relocated
 #    python on PATH). --enforce-eager for the smoke (skips torch.compile autotune
 #    cache writes that bit Midway on load). ──
-echo ">>> launching vllm.entrypoints.openai.api_server (model=$MODEL_PATH tp=$TP port=$PORT mem_util=$GPU_MEM_UTIL max_len=$MAX_MODEL_LEN)"
+EXTRA_ARGS=()
+[ -n "$MAX_NUM_BATCHED_TOKENS" ] && EXTRA_ARGS+=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
+[ -n "$MAX_NUM_SEQS" ] && EXTRA_ARGS+=(--max-num-seqs "$MAX_NUM_SEQS")
+echo ">>> launching vllm.entrypoints.openai.api_server (model=$MODEL_PATH tp=$TP port=$PORT mem_util=$GPU_MEM_UTIL max_len=$MAX_MODEL_LEN mnbt=${MAX_NUM_BATCHED_TOKENS:-default} mnseqs=${MAX_NUM_SEQS:-default})"
 python -m vllm.entrypoints.openai.api_server \
     --model "$MODEL_PATH" \
     --host 0.0.0.0 \
@@ -123,7 +133,8 @@ python -m vllm.entrypoints.openai.api_server \
     --max-model-len "$MAX_MODEL_LEN" \
     --enforce-eager \
     --trust-remote-code \
-    --disable-log-stats &
+    --disable-log-stats \
+    "${EXTRA_ARGS[@]}" &
 VLLM_PID=$!
 
 # ── Wait for health, then register the server for discovery ──

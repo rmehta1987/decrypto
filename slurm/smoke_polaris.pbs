@@ -14,6 +14,11 @@
 #
 # Submit:  qsub slurm/smoke_polaris.pbs
 #   override model/tp/venv:  qsub -v MODEL_KEY=...,MODEL_PATH=...,TP=...,VENV_TARBALL=... slurm/smoke_polaris.pbs
+# Engine/health knobs: GPU_MEM_UTIL (0.90), MAX_MODEL_LEN (8192), HEALTH_TIMEOUT (900).
+# RUN_EPISODE=0 turns the run.py episode into a single direct HTTP chat
+# completion instead — the big-model server sanity smoke (health + discovery +
+# real generation + KV-cache log line) without needing a per-model experiment
+# config or an episode's worth of debug walltime.
 #
 # (PBS reads only lines starting with "#PBS"; annotations go on the line ABOVE.)
 #PBS -N decrypto-polaris-smoke
@@ -33,6 +38,12 @@ VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
 MODEL_KEY="${MODEL_KEY:-qwen2.5_0.5B}"
 MODEL_PATH="${MODEL_PATH:-$BASE/models/Qwen2.5-0.5B-Instruct}"
 TP="${TP:-1}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-900}"
+RUN_EPISODE="${RUN_EPISODE:-1}"
 
 cd "$REPO_ROOT"
 mkdir -p "$REPO_ROOT/logs/paper" "$REPO_ROOT/logs/vllm"
@@ -104,17 +115,21 @@ cleanup() {
 trap cleanup EXIT TERM INT
 
 # ── Launch vLLM (module entrypoint; relocated venv can't use the `vllm` shebang) ──
-echo ">>> launching vLLM (model=$MODEL_PATH tp=$TP port=$PORT)"
+EXTRA_ARGS=()
+[ -n "$MAX_NUM_BATCHED_TOKENS" ] && EXTRA_ARGS+=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
+[ -n "$MAX_NUM_SEQS" ] && EXTRA_ARGS+=(--max-num-seqs "$MAX_NUM_SEQS")
+echo ">>> launching vLLM (model=$MODEL_PATH tp=$TP port=$PORT mem_util=$GPU_MEM_UTIL max_len=$MAX_MODEL_LEN mnbt=${MAX_NUM_BATCHED_TOKENS:-default} mnseqs=${MAX_NUM_SEQS:-default})"
 python -m vllm.entrypoints.openai.api_server \
     --model "$MODEL_PATH" \
     --host 0.0.0.0 \
     --port "$PORT" \
     --tensor-parallel-size "$TP" \
-    --gpu-memory-utilization 0.90 \
-    --max-model-len 8192 \
+    --gpu-memory-utilization "$GPU_MEM_UTIL" \
+    --max-model-len "$MAX_MODEL_LEN" \
     --enforce-eager \
     --trust-remote-code \
     --disable-log-stats \
+    "${EXTRA_ARGS[@]}" \
     > "$REPO_ROOT/logs/vllm/${MODEL_KEY}-${JOBTAG}.out" 2>&1 &
 VLLM_PID=$!
 
@@ -144,10 +159,12 @@ until health_ok; do
         echo "DIAG: listening sockets on :$PORT:"; ss -ltn 2>/dev/null | grep ":$PORT" || echo "  (port not listening?)"
         _diag=1
     fi
-    if [ $((SECONDS-_t0)) -gt 900 ]; then echo "FATAL: vLLM not healthy in 900s"; exit 45; fi
+    if [ $((SECONDS-_t0)) -gt "$HEALTH_TIMEOUT" ]; then echo "FATAL: vLLM not healthy in ${HEALTH_TIMEOUT}s"; exit 45; fi
     sleep 5
 done
 echo ">>> vLLM healthy after $((SECONDS-_t0))s"
+echo ">>> KV-cache evidence from the engine log:"
+grep -E "KV cache size|Maximum concurrency|GPU blocks" "$REPO_ROOT/logs/vllm/${MODEL_KEY}-${JOBTAG}.out" || echo "  (no KV-cache line found)"
 
 # ── Register the server for discovery (atomic publish) ──
 python - "$MODEL_KEY" "$MODEL_PATH" "$SERVER_ADDR" "$PORT" "$PBS_JOBID" "$SERVERS_FILE" <<'PYEOF'
@@ -162,6 +179,30 @@ PYEOF
 # ── Confirm discovery + HTTP reachability via ping_servers (same code Midway uses) ──
 echo ">>> ping_servers:"
 python -m slurm.ping_servers || true
+
+if [ "$RUN_EPISODE" = "0" ]; then
+    echo "=== RUN_EPISODE=0: direct HTTP chat completion instead of run.py ==="
+    python - "$MODEL_PATH" "$PORT" <<'PYEOF'
+import json, sys, time, urllib.request
+model, port = sys.argv[1], sys.argv[2]
+body = json.dumps({
+    "model": model,
+    "messages": [{"role": "user", "content": "In one short sentence, what is the game Decrypto about?"}],
+    "max_tokens": 64, "temperature": 0.0,
+}).encode()
+op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+req = urllib.request.Request(
+    f"http://127.0.0.1:{port}/v1/chat/completions", body,
+    {"Content-Type": "application/json"})
+t0 = time.time()
+out = json.load(op.open(req, timeout=300))
+print(f"completion in {time.time()-t0:.1f}s:", out["choices"][0]["message"]["content"])
+PYEOF
+    RUN_RC=$?
+    echo ">>> direct completion rc=$RUN_RC"
+    [ $RUN_RC -eq 0 ] && echo "=== SMOKE (server-sanity mode) PASSED at $(date) ==="
+    exit $RUN_RC
+fi
 
 echo "=== running run.py (self-play, 1 episode) ==="
 python run.py \

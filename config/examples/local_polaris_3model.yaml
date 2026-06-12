@@ -33,8 +33,8 @@ no_error_history: true
 # budget thinking and never emit the JSON the runner parses).
 models:
   - _target_: src.types.LocalModel
-    model_key: llama3.1_70B
-    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Meta-Llama-3.1-70B-Instruct
+    model_key: qwen2.5_72B
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen2.5-72B-Instruct
     max_tokens: 1000
     temperature: 0.0
   - _target_: src.types.LocalModel

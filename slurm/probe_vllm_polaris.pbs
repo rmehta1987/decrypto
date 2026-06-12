@@ -119,20 +119,32 @@ echo "=== Stage 3: vLLM can load + generate each model at its TP (enforce_eager)
 PROBE_FAILED=0
 IFS=';' read -ra SPECS <<< "$MODEL_SPECS"
 for spec in "${SPECS[@]}"; do
-    IFS=':' read -r MODEL TP GPU_MEM_UTIL MAX_MODEL_LEN <<< "$spec"
+    IFS=':' read -r MODEL TP GPU_MEM_UTIL MAX_MODEL_LEN MNBT MNSEQS <<< "$spec"
     TP="${TP:-1}"; GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"; MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
-    echo "--- probing: $MODEL  (tp=$TP mem_util=$GPU_MEM_UTIL max_len=$MAX_MODEL_LEN) ---"
-    timeout "$PROBE_TIMEOUT" python -u - "$MODEL" "$TP" "$GPU_MEM_UTIL" "$MAX_MODEL_LEN" <<'PY'
+    # Optional 5th/6th fields: max_num_batched_tokens / max_num_seqs. Weight-tight
+    # TP=4 models need a small profiling batch AND a small scheduler slot count or
+    # the profiling peak (activations + dummy-sampler logits scaling with
+    # max_num_seqs, default 1024) leaves no room for KV blocks. Chunked prefill is
+    # on by default on the V1 engine, so long prompts still work in chunks.
+    MNBT="${MNBT:-}"; MNSEQS="${MNSEQS:-}"
+    echo "--- probing: $MODEL  (tp=$TP mem_util=$GPU_MEM_UTIL max_len=$MAX_MODEL_LEN mnbt=${MNBT:-default} mnseqs=${MNSEQS:-default}) ---"
+    timeout "$PROBE_TIMEOUT" python -u - "$MODEL" "$TP" "$GPU_MEM_UTIL" "$MAX_MODEL_LEN" "$MNBT" "$MNSEQS" <<'PY'
 import sys
 from vllm import LLM, SamplingParams
 model, tp, mem, mlen = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])
-print("loading:", model, "tp:", tp, flush=True)
+kwargs = {}
+if len(sys.argv) > 5 and sys.argv[5]:
+    kwargs["max_num_batched_tokens"] = int(sys.argv[5])
+if len(sys.argv) > 6 and sys.argv[6]:
+    kwargs["max_num_seqs"] = int(sys.argv[6])
+print("loading:", model, "tp:", tp, "extra:", kwargs, flush=True)
 llm = LLM(
     model=model,
     tensor_parallel_size=tp,
     gpu_memory_utilization=mem,
     max_model_len=mlen,
     enforce_eager=True,   # skip CUDA graph capture to isolate basic-op failures
+    **kwargs,
 )
 out = llm.generate(["Say hi in five words."], SamplingParams(max_tokens=20, temperature=0.0))
 print("OUT:", out[0].outputs[0].text, flush=True)

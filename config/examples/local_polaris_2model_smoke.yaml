@@ -1,0 +1,34 @@
+defaults:
+  - override hydra/job_logging: disabled
+
+_target_: src.types.ExperimentConfig
+# Launcher-mechanics smoke for the multi-server pattern on preemptable: only
+# the two staged Qwen3 models (2x2x2 = 8 combos per seed). Used to prove the
+# 3-server machinery (discovery dir merge, EXPECTED_MODELS wait, dependent
+# experiment, qdel) before Llama-3.1-70B is staged. Not a science run.
+num_episodes: 1
+env_seed: [0]
+verbose: false
+baseline_data_dir: embedding_models/
+exp_name: polaris_2model_smoke
+
+match_encoder_decoder: false
+fixed_encoder: ""
+fixed_decoder: ""
+fixed_interceptor: ""
+filter_model: ""
+no_error_history: true
+
+models:
+  - _target_: src.types.LocalModel
+    model_key: qwen3_8b
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen3-8B
+    max_tokens: 2500
+    max_reasoning_tokens: 2000
+    temperature: 0.0
+  - _target_: src.types.LocalModel
+    model_key: qwen3_4b
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen3-4B
+    max_tokens: 2500
+    max_reasoning_tokens: 2000
+    temperature: 0.0

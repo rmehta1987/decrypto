@@ -34,12 +34,13 @@ load-bearing fixes are in [`midway_notes.md`](midway_notes.md).
   (JSON-format retries fail) — a model-capacity issue, not a pipeline issue,
   matching the Midway result.
 - **Three-model scale-up: in progress.** Target experiment: full cross-play of
-  Llama-3.1-70B-Instruct + Qwen3-8B + Qwen3-4B (27 encoder×decoder×interceptor
+  **Qwen2.5-72B-Instruct + Qwen3-8B + Qwen3-4B** (27 encoder×decoder×interceptor
   combinations per env seed; config `config/examples/local_polaris_3model.yaml`).
   Qwen3-8B and Qwen3-4B are staged and probe Successful at TP=1 (job 7197265).
-  Llama-3.1-70B staging is blocked on a Hugging Face token for the gated repo
-  (401 `GatedRepoError` recorded 2026-06-12); the TP=4 plan below is derived and
-  awaiting on-cluster verification.
+  The 70B-class slot was originally Llama-3.1-70B-Instruct; that repo is gated
+  and no HF token exists on this machine (401 `GatedRepoError`, 2026-06-12), so
+  the owner directed substituting the open Qwen2.5-72B-Instruct. Its TP=4 plan
+  below is derived and awaiting on-cluster verification.
 
 ```bash
 # Reproduce the proven single-model smoke (debug queue):
@@ -113,7 +114,8 @@ are the vLLM startup log's own report, captured per job.
 |---|---|---|---|---|---|---|
 | `qwen3_8b` | `Qwen/Qwen3-8B` | 16 GB (5 shards) | 32 / 8 | 1 | ~16 GB | Successful — job 7197265: loaded at TP=1, mem_util 0.90, max_len 8192; KV cache 133,312 tokens (16.27× concurrency); generated (`logs/probe_wrap_7197265.log`) |
 | `qwen3_4b` | `Qwen/Qwen3-4B` | 7.5 GB (3 shards) | 32 / 8 | 1 | ~8 GB | Successful — job 7197265: KV cache 189,648 tokens (23.15×); generated |
-| `llama3.1_70B` | `meta-llama/Meta-Llama-3.1-70B-Instruct` (gated) | ~141 GB expected | 64 / 8 expected — to be read from staged `config.json` | **4** | ~35 GB | Pending — staging blocked on HF token (401 GatedRepoError, 2026-06-12). TP=4 is the only single-node fit on 40 GB cards; headroom for KV is ~1–4 GB/GPU at mem_util 0.92, so expect a small KV cache and lower `--max-model-len` (8192 → 4096 → 2048) if the engine OOMs on load |
+| `qwen2.5_72B` | `Qwen/Qwen2.5-72B-Instruct` (open) | 136 GiB (37 shards) | 64 / 8 (read from staged `config.json`; TP=4 → 16/2 per GPU) | **4** | 33.98 GiB measured | Successful — job 7197375: TP=4 is the only single-node fit on 40 GB cards, and it took three attempts to find the working engine config (see ledger 7197372/7197374): **mem_util 0.97 + `max_num_batched_tokens 2048` + `max_num_seqs 64`** → KV cache 18,800 tokens (2.29× concurrency @ 8192); generated. At mem_util ≤ 0.95 or default profiling settings the engine has zero KV memory |
+| (dropped) `llama3.1_70B` | `meta-llama/Meta-Llama-3.1-70B-Instruct` (gated) | not staged | — | — | Unsuccessful — 401 `GatedRepoError` on a login node, 2026-06-12 (no HF token with an accepted Meta license on this machine). Owner substituted Qwen2.5-72B-Instruct rather than provide a token |
 | `qwen2.5_0.5B` | `Qwen/Qwen2.5-0.5B-Instruct` | 954 MB | 14 / 2 | 1 | ~1 GB | Successful — probe 7186959 and smoke 7186966 (the original port) |
 
 - Multi-node tensor/pipeline parallelism (Ray spanning nodes) is explicitly out
@@ -158,9 +160,10 @@ Done once per account, on a **login node** (has internet + HF reachability).
    # on a login node, in the decrypto-serve venv:
    huggingface-cli download Qwen/Qwen3-8B --local-dir $BASE/models/Qwen3-8B
    huggingface-cli download Qwen/Qwen3-4B --local-dir $BASE/models/Qwen3-4B
-   # gated — requires an accepted Meta license + HF_TOKEN on this machine:
-   huggingface-cli download meta-llama/Meta-Llama-3.1-70B-Instruct \
-     --local-dir $BASE/models/Meta-Llama-3.1-70B-Instruct
+   huggingface-cli download Qwen/Qwen2.5-72B-Instruct \
+     --local-dir $BASE/models/Qwen2.5-72B-Instruct
+   # (gated repos like meta-llama/* additionally need an accepted license +
+   #  HF_TOKEN on this machine; a tokenless attempt 401s immediately)
    ```
 
    After each download, verify completeness — a truncated pull is a classic
@@ -339,6 +342,10 @@ never a cluster-wide `find`).
 | `logs/build/decrypto_serve_venv.log`, `logs/build/runner_import_check.log`, `logs/build/vllm_help_check.log` | n/a (login) | — | — | Successful | One-time serving-venv build + import/`vllm --help` sanity checks |
 | `logs/build/download_qwen3_8b.log`, `logs/build/download_qwen3_4b.log` | n/a (login) | — | Qwen3-8B, Qwen3-4B | Successful | Login-node `huggingface-cli download` (2026-06-12, ~3 min each); all shards + `model.safetensors.index.json` verified present |
 | `logs/probe_wrap_7197265.log`, `logs/probe_nvidia-smi_7197265.txt`, `logs/7197265.*.OU/.ER` | 7197265 | debug | Qwen3-8B / TP1 + Qwen3-4B / TP1 | Successful | Multi-model probe on `x3005c0s31b1n0` (~77 s): A100-SXM4-40GB confirmed (40960 MiB); Qwen3-8B KV cache 133,312 tokens (16.27× @ 8192), Qwen3-4B KV cache 189,648 tokens (23.15×); both generated; `Exit_status=0` |
+| `logs/build/download_qwen2.5_72b.log` | n/a (login) | — | Qwen2.5-72B | Successful | Login-node download (~25 min, 136 GiB); 37/37 shards verified against `model.safetensors.index.json`; `config.json` reads 64 attn / 8 KV heads / 80 layers |
+| `logs/probe_wrap_7197372.log`, `logs/7197372.*.OU/.ER` | 7197372 | debug | Qwen2.5-72B / TP4 | Unsuccessful | Weights loaded (33.98 GiB/GPU in 273 s — TP=4 fits) but at mem_util 0.95 / max_len 8192 the engine's profiling pass left no memory for KV blocks: `ValueError: No available memory for the cache blocks` → worker SIGKILL (rc=137). First fix attempt: cap the profiling/prefill batch |
+| `logs/probe_wrap_7197374.log`, `logs/7197374.*.OU/.ER` | 7197374 | debug | Qwen2.5-72B / TP4 | Unsuccessful | Same `No available memory for the cache blocks` despite `max_num_batched_tokens=2048` being active (`Chunked prefill is enabled with max_num_batched_tokens=2048` in the log) — the profiling peak is dominated by fixed costs (non-torch NCCL/IPC buffers for TP=4 + the dummy-sampler logits, which scale with `max_num_seqs`, default 1024, ~150k vocab), not the prefill batch. Next: mem_util 0.97 + `max_num_seqs 64` (job 7197375) |
+| `logs/probe_wrap_7197375.log`, `logs/probe_nvidia-smi_7197375.txt`, `logs/7197375.*.OU/.ER` | 7197375 | debug | Qwen2.5-72B / TP4 | Successful | On `x3204c0s7b0n0`: TP=4, mem_util 0.97, max_len 8192, `max_num_batched_tokens 2048`, `max_num_seqs 64`. Weights 33.98 GiB/GPU in 232 s; **KV cache 18,800 tokens (2.29× concurrency at 8,192 tokens/request)**; generated a completion; `Exit_status=0`. This is the verified 72B serving configuration |
 
 ---
 
@@ -432,11 +439,58 @@ never a cluster-wide `find`).
   `../MARSHAL/polaris_pbs_notes.md` resolves.
 - **2026-06-12 — Staged Qwen3-8B (16 GB) and Qwen3-4B (7.5 GB)** on a login node
   (`logs/build/download_qwen3_{8b,4b}.log`); verified `config.json` + all shards
-  against each `model.safetensors.index.json`. **Llama-3.1-70B staging is blocked:**
+  against each `model.safetensors.index.json`. **Llama-3.1-70B staging blocked:**
   the repo `meta-llama/Meta-Llama-3.1-70B-Instruct` is gated and no HF token
   exists on this machine (`huggingface-cli whoami` → "Not logged in";
-  download attempt → 401 `GatedRepoError`, recorded). Waiting on a token with an
-  accepted Meta license.
+  download attempt → 401 `GatedRepoError`, recorded).
+- **2026-06-12 — 70B-class slot substituted: Qwen2.5-72B-Instruct.** Presented
+  the owner three options (provide an HF token for the official gated repo; use
+  the ungated NousResearch mirror; substitute the open Qwen2.5-72B-Instruct).
+  The owner chose **Qwen2.5-72B-Instruct** — open repo, no token, and it was the
+  original scaling target named in this notebook. Consequences: `model_key` is
+  `qwen2.5_72B` everywhere (config, launcher, `agent_paths`); bf16 weights are
+  ~145 GB (slightly heavier than Llama-70B's ~141 GB), so the per-GPU margin at
+  TP=4 shrinks — the launcher sets `--gpu-memory-utilization 0.95` for the 72B
+  (at 0.92 the ~0.4 GB/GPU KV headroom would not cover an 8192-token max_len).
+  Download started (`logs/build/download_qwen2.5_72b.log`); the empty
+  `Meta-Llama-3.1-70B-Instruct` dir skeleton from the 401 attempt was removed.
+- **2026-06-12 — 72B probe attempt 1 (7197372) Unsuccessful: zero KV memory at
+  TP=4 / mem_util 0.95 / max_len 8192.** The load itself succeeded — vLLM
+  reported `Model loading took 33.9835 GiB` per GPU in 273 s, confirming the
+  TP=4 weight fit on 40 GB cards — but `_initialize_kv_caches` raised
+  `No available memory for the cache blocks` and the worker died with rc=137.
+  Arithmetic: budget 0.95 × 40 GiB = 38 GiB; weights 33.98 GiB; the remaining
+  ~4 GiB was consumed by the memory-profiling forward pass at the default
+  8192-token batch. Chosen fix (over halving `max_model_len`, which would risk
+  truncating late-game Decrypto prompts): cap `--max-num-batched-tokens` at
+  2048 so the profiling/prefill activation peak shrinks; chunked prefill (on by
+  default in the V1 engine) prefills longer prompts in 2048-token chunks.
+  Expected KV ≈ 2.5 GiB/GPU ≈ 32k tokens at 80 KiB/token-per-GPU (80 layers ×
+  2-of-8 KV heads × 128 dim × K+V × bf16). Added the knob to probe/server/smoke
+  scripts + a per-model `mnbts` array in the launcher; resubmitted as 7197374.
+- **2026-06-12 — 72B probe attempt 2 (7197374) Unsuccessful, attempt 3 (7197375)
+  Successful — the verified 72B config.** Attempt 2 kept mem_util 0.95 and
+  added `max_num_batched_tokens=2048`; the engine still reported
+  `No available memory for the cache blocks`, proving the profiling peak is
+  dominated by fixed costs, not the prefill batch: non-torch allocations (NCCL +
+  IPC buffers for TP=4, CUDA context) plus the profiling dummy-sampler whose
+  logits tensors scale with `max_num_seqs` (default 1024 × ~152k vocab).
+  Attempt 3 raised mem_util to **0.97** and capped **`max_num_seqs` to 64**
+  (well above the ~27 concurrent games the cross-play generates): KV cache
+  **18,800 tokens**, 2.29× concurrency at 8,192-token requests, generation
+  Successful (`logs/probe_wrap_7197375.log`, node x3204c0s7b0n0). Real Decrypto
+  prompts are far shorter than 8,192 tokens, so effective concurrency is
+  higher; requests beyond KV capacity queue inside vLLM. All serving scripts
+  now expose `MAX_NUM_BATCHED_TOKENS` / `MAX_NUM_SEQS`, and the launcher pins
+  the 72B to `0.97 / 8192 / 2048 / 64`.
+- **2026-06-12 — Launcher-mechanics smoke on `preemptable` (first multi-job
+  launch).** Before the 72B is staged, validated the multi-server machinery with
+  the two Qwen3 models alone: added an `ONLY_MODELS` subset filter to
+  `launch_servers_polaris.sh` and a `local_polaris_2model_smoke.yaml` config
+  (2×2×2 = 8 combos × 2 seeds = 16 games; also exercises the space-separated
+  `SEEDS` passthrough). Submitted servers 7197358 (qwen3_8b) + 7197359
+  (qwen3_4b) and dependent experiment 7197360. Outcome recorded in the ledger
+  when complete.
 - **2026-06-12 — Derived the TP plan from staged `config.json` files** (see the
   staged-models table): Qwen3-8B/-4B have 32 attention / 8 KV heads → TP=1
   (single 40 GB card holds 16/8 GB of weights with ample KV headroom);

@@ -127,7 +127,11 @@ every shard in `model.safetensors.index.json` exists on disk):
 | `Qwen2.5-0.5B-Instruct` | `Qwen/Qwen2.5-0.5B-Instruct` | 954 MB |
 | `Qwen3-8B` | `Qwen/Qwen3-8B` | 16 GB |
 | `Qwen3-4B` | `Qwen/Qwen3-4B` | 7.5 GB |
-| `Meta-Llama-3.1-70B-Instruct` | `meta-llama/Meta-Llama-3.1-70B-Instruct` | ~141 GB (pending — gated; see below) |
+| `Qwen2.5-72B-Instruct` | `Qwen/Qwen2.5-72B-Instruct` | ~145 GB (37 shards) |
+
+(The 70B-class slot was originally `meta-llama/Meta-Llama-3.1-70B-Instruct`;
+that repo is gated, no HF token existed here — 401 `GatedRepoError`,
+2026-06-12 — and the owner substituted the open Qwen2.5-72B-Instruct.)
 
 ```bash
 # in the decrypto-serve venv, on a login node:
@@ -229,7 +233,7 @@ model inline: `qsub -v MODEL_KEY=...,MODEL_PATH=...,TP=... slurm/smoke_polaris.p
 
 ## Step 5 — The multi-model cross-play run (`preemptable`, multi-node)
 
-The realized experiment: **Llama-3.1-70B-Instruct + Qwen3-8B + Qwen3-4B** served
+The realized experiment: **Qwen2.5-72B-Instruct + Qwen3-8B + Qwen3-4B** served
 concurrently, all three models available to all three Decrypto roles → the
 runner's `itertools.product` yields **27 encoder×decoder×interceptor
 combinations per env seed** (`config/examples/local_polaris_3model.yaml`:
@@ -243,7 +247,7 @@ Per-GPU weights ≈ `2 × params / TP` bytes (bf16); TP must divide both
 
 | Model | bf16 weights | Heads (attn/KV) | TP | weights/GPU | KV-cache evidence |
 |---|---|---|---|---|---|
-| Llama-3.1-70B | ~141 GB | 64 / 8 (expected) | **4** | ~35 GB — tight on 40 GB | pending the 70B probe; if it OOMs, drop `--max-model-len` 8192→4096→2048 and/or raise `--gpu-memory-utilization` toward 0.95 |
+| Qwen2.5-72B | ~145 GB | 64 / 8 (verify from staged config.json) | **4** | ~36.4 GB — very tight on 40 GB; launcher uses mem_util 0.95 | pending the 72B probe; if it OOMs or KV < max_len, drop `--max-model-len` 8192→4096→2048 |
 | Qwen3-8B | ~16 GB | 32 / 8 | 1 | ~16 GB | job 7197265: 133,312 tokens @ max_len 8192 |
 | Qwen3-4B | ~8 GB | 32 / 8 | 1 | ~8 GB | job 7197265: 189,648 tokens |
 
