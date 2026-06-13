@@ -379,14 +379,17 @@ qsub -v MODEL_SPECS="<path>:<tp>:<mem>:<len>;..." slurm/probe_vllm_polaris.pbs
 qsub slurm/smoke_polaris.pbs                       # server + 1 episode + results
 qsub -v MODEL_KEY=...,MODEL_PATH=...,TP=4 slurm/smoke_polaris.pbs   # override model
 
-# multi-model cross-play (preemptable, NOT debug):
-bash slurm/launch_servers_polaris.sh               # 27-game orchestration smoke
-SERVER_WALLTIME=17:00:00 EXP_WALLTIME=16:00:00 SEEDS="0 1 2 3 4" \
-  bash slurm/launch_servers_polaris.sh             # production
+# multi-model cross-play — fused single 4-node job (the proven path):
+qsub slurm/fused_3model_polaris.pbs                # 27-game smoke (preemptable)
+qsub -q capacity -l walltime=16:00:00 \
+  -v EXP_NAME=polaris_3model,SEEDS="0 1 2 3 4 5 6 7 8 9 10 11 12 13 14" \
+  slurm/fused_3model_polaris.pbs                   # production (405 games)
+
+# (two-job launcher exists but loses to queue skew on busy queues — see Step 5)
 
 # watch / manage:
-tail -f logs/paper/polaris_smoke_<jid>.log         # experiment progress
-tail -f logs/vllm/<model_key>-<jid>.wrap.log       # server progress
+tail -f logs/paper/polaris_fused_<jid>.log         # fused job progress
+tail -f logs/vllm/<model_key>-<jid>.wrap.log       # per-server progress
 qstat -u $USER          # my jobs        qdel <jid>     # cancel
-qstat -Qf preemptable   # queue limits   pbsnodes -l    # offlined nodes
+qstat -Qf capacity      # queue limits   pbsnodes -l    # offlined nodes
 ```

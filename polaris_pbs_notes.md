@@ -571,6 +571,23 @@ never a cluster-wide `find`).
   process per game, so the production seed count is bounded by the experiment
   node's `pids.max=4096` — added `OMP_NUM_THREADS=1` to the fused experiment
   node and chose 15 seeds (405 games / 405 processes) for rung 5.
+- **2026-06-12/13 — Rung 5 production: first submission stuck, requeued
+  shorter.** Submitted the production run as job 7197605 (fused, capacity,
+  16 h walltime, 15 seeds = 405 games) on 2026-06-12 14:14. It sat **~32 h
+  eligible with no estimated start**, comment `Not Running: Job would conflict
+  with reservation or top job`: the capacity queue was full (12 running against
+  the 32-node project cap, and capacity allows ≤168 h jobs that hold nodes for
+  days), and a 4-node × 16 h request is too large to backfill ahead of the
+  reserved top job. Diagnosis used the smoke's measured throughput: 7197574 ran
+  27 games in ~18 min of game loop (servers ready → `FUSED RUN COMPLETE`);
+  extrapolating throughput-bound to 405 games (~15× the 72B request load) gives
+  ~5 h. The 16 h walltime was therefore ~3× margin and needlessly unschedulable.
+  Cancelled 7197605 and resubmitted as **7199012** (fused, capacity, **10 h**
+  walltime — still in the 8–16 h band, ~2× the ~5 h estimate, and 37% shorter
+  to improve backfill odds; 15 seeds unchanged). Per-game result dirs are
+  written incrementally under `results/polaris_3model/`, so even a walltime
+  overrun yields recoverable partial data. If 7199012 also fails to get an ETA,
+  the fallback is `preemptable` (the fused job is atomic with `#PBS -r y`).
 - **2026-06-12 — Derived the TP plan from staged `config.json` files** (see the
   staged-models table): Qwen3-8B/-4B have 32 attention / 8 KV heads → TP=1
   (single 40 GB card holds 16/8 GB of weights with ample KV headroom);
