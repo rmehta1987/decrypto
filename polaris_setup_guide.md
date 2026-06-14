@@ -331,11 +331,19 @@ scales seeds/episodes and the wall clock.
 - **Scale via env knobs**, not config edits: `SEEDS="0 1 2 ..."` widens
   `env_seed` (27 combos × |seeds| games at `num_episodes: 1`), `NUM_EPISODES=N`
   repeats each combo×seed. Mind the blow-up and note the count you ran.
-- **Mind `pids.max=4096` when scaling seeds.** The runner spawns **one process
-  per game** (`ProcessPoolExecutor(max_workers=total games)`); the fused script
-  sets `OMP_NUM_THREADS=1` on the experiment node so 405 game processes
-  (15 seeds) stay well under the per-job cgroup cap. Hundreds more seeds would
-  need batching, not just a bigger walltime.
+- **Cap concurrency to the slowest server — `DECRYPTO_MAX_WORKERS`.** The runner
+  spawns **one process per game** (`ProcessPoolExecutor(max_workers=total
+  games)`). Run all 405 games at once and they flood the slow 72B server
+  (KV cache ~18,800 tokens ≈ 2.3× concurrency): job 7199012 lost ~40% of games —
+  almost all of them 72B-involving — to `APITimeoutError`/`503` and wrote only
+  245/405 rows. The fused script sets `DECRYPTO_MAX_WORKERS=24` (below the
+  27-game smoke's proven-safe load) so the 72B is never overwhelmed; the run
+  trades wall-clock (~5 h vs ~1.6 h) for completeness. **Match game concurrency
+  to the slowest server's KV capacity, not the combination count.** Default
+  (env unset) preserves the original one-worker-per-game behavior.
+- **`pids.max=4096`.** With `OMP_NUM_THREADS=1` (set by the fused script) and
+  `DECRYPTO_MAX_WORKERS=24`, process/thread counts stay far under the per-job
+  cgroup cap regardless of seed count.
 - **Queue: `capacity` for production.** No preemption, ≤168 h, 1–4 nodes — the
   fused 4-node job fits exactly, and it started within a minute on 2026-06-12
   while preemptable 1-node jobs waited 3–7 h. Walltime is an upper bound; the

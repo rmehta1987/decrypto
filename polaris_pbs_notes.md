@@ -356,6 +356,9 @@ never a cluster-wide `find`).
 | `logs/paper/polaris_smoke_7197382.log`, `logs/paper/7197382.*.OU/.ER` | 7197382 | preemptable | 3-model experiment | Unsuccessful | Started 12:44 alongside the 72B, but the two Qwen3 servers had already died at their walltimes hours earlier; replacement servers (7197525/7197526, submitted 12:48 into the same SERVERS_DIR) were still queued when WAIT_TIMEOUT expired: `FATAL: only 1/3 servers ready after 3600s`, exit 46, qdel'd the surviving 72B. 7197525 started at almost that exact minute; both replacements were then qdel'd as orphans |
 | (no log — qdel'd while queued) | 7197525, 7197526, 7197528 | preemptable | replacements + fused copy | Aborted | 7197525/26: orphaned Qwen3 replacement servers, qdel'd after their experiment died. 7197528: preemptable copy of the fused smoke, qdel'd once the capacity copy started first |
 | `logs/paper/polaris_fused_7197574.log`, `logs/vllm/{qwen2.5_72B,qwen3_8b,qwen3_4b}-7197574.wrap.log`, `logs/paper/7197574.*.OU/.ER` | 7197574 | **capacity** | 3 servers + experiment, fused 4-node job | **Successful — rungs 3+4** | Started 1 min after submission. All 3 servers ready in **361 s** (one per node via `mpiexec --hosts`); ran the full **27-combination** cross-play matrix (1 seed × 1 episode); `run.py` rc=0; `results/polaris_3model_fused_cap/experiment_summary.csv` = 27 rows, verified to contain all 27 unique (encoder, decoder, interceptor) triples; per-combo dirs written incrementally. Total job 25 min. "FUSED RUN COMPLETE" |
+| (no log — stuck job, qdel'd) | 7197605 | capacity | production (16 h, 405 games) | Aborted | Sat ~32 h eligible with no estimated start (`would conflict with reservation or top job`); a 4-node × 16 h request could not backfill on the full 32-node queue. Cancelled and resubmitted shorter (7199012) |
+| `logs/paper/polaris_fused_7199012.log`, `logs/vllm/*-7199012.wrap.log`, `results/polaris_3model_overload_7199012/`, `logs/paper/7199012.*.OU/.ER` | 7199012 | **capacity** | production, fused 4-node, **405 games at full concurrency** | **Unsuccessful (incomplete: 245/405)** | Started ~2.5 h after submit (10 h walltime). 3 servers healthy in 360 s; ran the full 405-combination matrix in **1 h 39 m** (`run.py` rc=0, Exit_status=0). But `ProcessPoolExecutor(max_workers=405)` flooded the slow 72B server (KV ~18,800 tokens ≈ 2.3× concurrency): run log shows **312 `APITimeoutError`, 194×`503`, 156 "Error occurred with model qwen2.5_72B"** (vs 3 for qwen3_4b); the 72B server logged 716 aborts on 1,929 requests (~37%). Only **245/405** summary rows landed; the missing ~40% are systematically the 72B-involving games (all-Qwen3 combos 14–15/15 present; `72B`-as-encoder combos as low as 1/15). Gameplay quality where it ran was high. Root cause: server-concurrency overload, **not** model capability. Partial results preserved at `results/polaris_3model_overload_7199012/` |
+| `logs/paper/polaris_fused_7199082.log`, `logs/vllm/*-7199082.wrap.log`, `results/polaris_3model/` | 7199082 | **capacity** | production, fused 4-node, **405 games throttled to 24 concurrent** | In progress | Resubmit with `DECRYPTO_MAX_WORKERS=24` (opt-in cap added to `runner.py`) so the 72B sees the smoke's proven-safe load |
 
 ---
 
@@ -609,6 +612,30 @@ never a cluster-wide `find`).
   under `results/polaris_3model/`, so a walltime kill loses only in-flight games
   and the completed seeds remain analyzable; a follow-up job can cover any
   missing seeds. Tracking the completion curve to project the finish.
+- **2026-06-14 — Rung 5 attempt 1 (7199012) completed but INCOMPLETE: 72B
+  server overload at full concurrency (245/405 games).** The early-rate worry
+  was unfounded — the run finished in 1 h 39 m (the rate climbed sharply as the
+  405-way pool drained). But only 245 of 405 summary rows landed, and the
+  pattern was diagnostic: the 8 all-Qwen3 combos (no 72B) were present in
+  14–15/15 seeds, while combos involving qwen2.5_72B fell off progressively,
+  worst when the 72B was the **encoder** (the role that calls every turn) — as
+  low as 1/15. The run log shows 312 `APITimeoutError`, 194×`503`, and 156 of
+  the ~160 game failures naming `qwen2.5_72B`; the 72B server logged 716 aborts
+  on 1,929 requests. **Root cause: server-concurrency overload, not model
+  capability** — `run_experiments` uses `ProcessPoolExecutor(max_workers=
+  total_experiments)`, so all 405 games hammered the three servers at once and
+  the slow 72B (KV ~18,800 tokens ≈ 2.3× concurrency at 8192) could not keep up;
+  timed-out/503'd requests raise past `role_client`'s retry list and the game
+  future is dropped with no result row (runner.py:1474). The 27-game smoke had
+  succeeded precisely because 27-way concurrency is within the 72B's capacity.
+  **Fix:** added an opt-in `DECRYPTO_MAX_WORKERS` cap to `run_experiments`
+  (default unset = original one-worker-per-combination behavior; semantics
+  unchanged, only parallelism throttled) and set it to **24** in
+  `fused_3model_polaris.pbs` — below the proven-safe 27. Preserved the partial
+  run at `results/polaris_3model_overload_7199012/` (evidence) and resubmitted
+  as **7199082**. Expected wall-clock at 24-way ≈ 5 h (well within 10 h).
+  Operational lesson for self-hosted serving: match game concurrency to the
+  **slowest** server's KV-cache capacity, not the number of combinations.
 - **2026-06-12 — Derived the TP plan from staged `config.json` files** (see the
   staged-models table): Qwen3-8B/-4B have 32 attention / 8 KV heads → TP=1
   (single 40 GB card holds 16/8 GB of weights with ample KV headroom);

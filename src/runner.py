@@ -1432,7 +1432,18 @@ def run_experiments(cfg):
     print(f"Results will be saved in folder: {base_path}")
 
     start_time = time.time()
-    with ProcessPoolExecutor(max_workers=total_experiments) as executor:
+    # Optional concurrency cap. Default (env unset) preserves the original
+    # behavior of one worker per combination. Self-hosted vLLM serving has finite
+    # KV-cache concurrency, so flooding the servers with hundreds of simultaneous
+    # games causes request timeouts/503s that drop those games (no result row);
+    # capping to the proven-sustainable concurrency makes the run reliable at the
+    # cost of wall-clock. See DECRYPTO_MAX_WORKERS in slurm/fused_3model_polaris.pbs.
+    max_workers = total_experiments
+    _cap = os.environ.get("DECRYPTO_MAX_WORKERS")
+    if _cap:
+        max_workers = max(1, min(max_workers, int(_cap)))
+        print(f"DECRYPTO_MAX_WORKERS set: throttling to max_workers={max_workers}")
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_to_combo = {
             executor.submit(run_games, *combo, cfg): combo for combo in combinations
         }

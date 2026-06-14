@@ -124,6 +124,12 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 # count (= 64 hw threads) that would blow the per-job cgroup pids.max=4096.
 # The experiment is HTTP-only, so 1 BLAS/OMP thread per game process is right.
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+# Cap concurrent games so the slow 72B server (KV cache ~18,800 tokens ≈ 2.3x
+# concurrency at 8192) is not flooded. Job 7199012 ran all 405 games at once and
+# lost ~40% — almost entirely 72B-involving games — to APITimeoutError/503 on
+# the overwhelmed 72B server. The 27-game smoke (7197574) completed cleanly, so
+# ~24 concurrent is the proven-safe load. Default (unset) = one worker per game.
+export DECRYPTO_MAX_WORKERS="${DECRYPTO_MAX_WORKERS:-24}"
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY
 export no_proxy="localhost,127.0.0.1,::1,10.201.0.0/16,.hsn.cm.polaris.alcf.anl.gov,.alcf.anl.gov"
 export NO_PROXY="$no_proxy"
