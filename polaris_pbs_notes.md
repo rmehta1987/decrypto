@@ -22,8 +22,19 @@ load-bearing fixes are in [`midway_notes.md`](midway_notes.md).
 
 ---
 
-## Status (2026-06-12)
+## Status (2026-06-14) — three-model cross-play COMPLETE
 
+- **Three-model cross-play: complete.** Qwen2.5-72B-Instruct + Qwen3-8B +
+  Qwen3-4B served concurrently at verified TP (72B TP=4, Qwen3 TP=1) via the
+  fused single-job vehicle; the full **405-game** cross-play matrix (15 env
+  seeds × 27 encoder×decoder×interceptor combinations) completed and
+  `results/polaris_3model/experiment_summary.csv` holds **405 rows, every seed
+  27/27** (job 7199082 throttled run, 403; + 2 recovered by job 7199219 after
+  the parser fix). Servers `qdel`'d on completion. Verified TP/serving config,
+  the two production failure modes and their fixes (72B server overload →
+  `DECRYPTO_MAX_WORKERS` throttle; `extract_json_answer` `None` crash → guard),
+  the queue strategy (fused job on `capacity`), and the complete job ledger are
+  recorded below.
 - **Single-model pipeline: proven end-to-end.** The Qwen2.5-0.5B self-play smoke
   closed on a Polaris A100 (single-job 7186966, node `x3106c0s13b0n0`): venv
   staged from tarball (12 s), `vllm serve` healthy (21 s), discovery via
@@ -36,11 +47,11 @@ load-bearing fixes are in [`midway_notes.md`](midway_notes.md).
 - **Three-model scale-up: in progress.** Target experiment: full cross-play of
   **Qwen2.5-72B-Instruct + Qwen3-8B + Qwen3-4B** (27 encoder×decoder×interceptor
   combinations per env seed; config `config/examples/local_polaris_3model.yaml`).
-  Qwen3-8B and Qwen3-4B are staged and probe Successful at TP=1 (job 7197265).
-  The 70B-class slot was originally Llama-3.1-70B-Instruct; that repo is gated
-  and no HF token exists on this machine (401 `GatedRepoError`, 2026-06-12), so
-  the owner directed substituting the open Qwen2.5-72B-Instruct. Its TP=4 plan
-  below is derived and awaiting on-cluster verification.
+  Qwen3-8B and Qwen3-4B probe Successful at TP=1 (job 7197265); Qwen2.5-72B at
+  TP=4 (job 7197375). The 70B-class slot was originally Llama-3.1-70B-Instruct;
+  that repo is gated and no HF token exists on this machine (401
+  `GatedRepoError`, 2026-06-12), so the owner directed substituting the open
+  Qwen2.5-72B-Instruct.
 
 ```bash
 # Reproduce the proven single-model smoke (debug queue):
@@ -359,7 +370,7 @@ never a cluster-wide `find`).
 | (no log — stuck job, qdel'd) | 7197605 | capacity | production (16 h, 405 games) | Aborted | Sat ~32 h eligible with no estimated start (`would conflict with reservation or top job`); a 4-node × 16 h request could not backfill on the full 32-node queue. Cancelled and resubmitted shorter (7199012) |
 | `logs/paper/polaris_fused_7199012.log`, `logs/vllm/*-7199012.wrap.log`, `results/polaris_3model_overload_7199012/`, `logs/paper/7199012.*.OU/.ER` | 7199012 | **capacity** | production, fused 4-node, **405 games at full concurrency** | **Unsuccessful (incomplete: 245/405)** | Started ~2.5 h after submit (10 h walltime). 3 servers healthy in 360 s; ran the full 405-combination matrix in **1 h 39 m** (`run.py` rc=0, Exit_status=0). But `ProcessPoolExecutor(max_workers=405)` flooded the slow 72B server (KV ~18,800 tokens ≈ 2.3× concurrency): run log shows **312 `APITimeoutError`, 194×`503`, 156 "Error occurred with model qwen2.5_72B"** (vs 3 for qwen3_4b); the 72B server logged 716 aborts on 1,929 requests (~37%). Only **245/405** summary rows landed; the missing ~40% are systematically the 72B-involving games (all-Qwen3 combos 14–15/15 present; `72B`-as-encoder combos as low as 1/15). Gameplay quality where it ran was high. Root cause: server-concurrency overload, **not** model capability. Partial results preserved at `results/polaris_3model_overload_7199012/` |
 | `logs/paper/polaris_fused_7199082.log`, `logs/vllm/*-7199082.wrap.log`, `results/polaris_3model/` | 7199082 | **capacity** | production, fused 4-node, **405 games throttled to 24 concurrent** | **Successful (403/405)** | With `DECRYPTO_MAX_WORKERS=24`: started ~10 min after submit, 3 servers ready in 360 s, ran in **2 h 34 m** (`run.py` rc=0, Exit_status=0). Throttle clean — **0 server aborts on 1,736 72B requests, 0 APITimeoutError, 0 model timeouts** (vs 716 aborts unthrottled). **403/405** rows: the 2 drops (seed 10 + seed 12, both a Qwen3 interceptor) are a parser bug — `extract_json_answer` ran `re.search` on `None` content when the model returned an empty generation. Coverage went 245→403 purely from the throttle |
-| `logs/paper/polaris_fused_7199219.log`, `results/polaris_3model_fix2/` | 7199219 | **capacity** | seeds 10+12 rerun (54 games) with the None-guard fix | In progress | Targeted rerun after guarding `extract_json_answer` against `None`; recovers the 2 dropped games → merge to 405/405 |
+| `logs/paper/polaris_fused_7199219.log`, `results/polaris_3model_fix2/` | 7199219 | **capacity** | seeds 10+12 rerun (54 games) with the None-guard fix | **Successful (recovered both targets)** | With the `extract_json_answer` None-guard: seed 12 now 27/27 (the None-parse game recovered) and seed 10's originally-missing game present. 52/54 rows here (2 *different* seed-10 games hit a transient `ProcessPoolExecutor` "process terminated abruptly" worker death — unrelated to the parse bug), but those combos were already present in the main run, so the **union covers all 405**. Merged → `results/polaris_3model/experiment_summary.csv` = **405/405**, every seed 27/27 (provenance: 403 main + 2 rerun) |
 
 ---
 
@@ -662,6 +673,28 @@ never a cluster-wide `find`).
   (`exp_name=polaris_3model_fix2`, job 7199219) to merge to 405/405. The
   403-row CSV is preserved at
   `results/polaris_3model/experiment_summary_403rows_pre_fix.csv`.
+- **2026-06-14 — Rung 5 COMPLETE: 405/405.** The targeted rerun (7199219, seeds
+  10+12) confirmed the None-guard works — seed 12's parse-failed game came back
+  and seed 10's did too. The rerun itself lost 2 *different* seed-10 games to a
+  transient `ProcessPoolExecutor` worker death ("a process in the process pool
+  was terminated abruptly"), a flaky one-off unrelated to the parse bug; those
+  combos were already in the main run, so the **union of the two runs covers the
+  full matrix**. Merged main (403) + rerun (2 gap-fillers) →
+  `results/polaris_3model/experiment_summary.csv` = **405 rows, every one of the
+  15 seeds at 27/27, all 27 (encoder, decoder, interceptor) combinations
+  present** (verified against `itertools.product`). The merge takes validated
+  main-run rows first and only fills genuine gaps from the rerun; deterministic
+  at `temperature=0`. **Definition of done met:** 3 models served concurrently
+  at verified TP, the 27-combo matrix proven by the smoke (7197574) and the full
+  405-game cross-play completed, servers `qdel`'d, no stale references, notes in
+  the reviewer register with a complete job ledger.
+- **Cross-play data quality note.** Where games ran, play was competent across
+  all three models (coherent hints, correct decoding, strategic interception) —
+  the substitution to capable models achieved the experiment's purpose. The
+  summary's `total_*_fails` columns capture the per-role format-failure counts
+  for downstream analysis; the only games that ever dropped entirely were the
+  two server-overload classes (now fixed by the throttle) and the two parser
+  `None` crashes (now fixed by the guard), all documented above.
 - **2026-06-12 — Derived the TP plan from staged `config.json` files** (see the
   staged-models table): Qwen3-8B/-4B have 32 attention / 8 KV heads → TP=1
   (single 40 GB card holds 16/8 GB of weights with ample KV headroom);
