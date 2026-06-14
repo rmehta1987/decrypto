@@ -30,7 +30,9 @@ load-bearing fixes are in [`midway_notes.md`](midway_notes.md).
   seeds × 27 encoder×decoder×interceptor combinations) completed and
   `results/polaris_3model/experiment_summary.csv` holds **405 rows, every seed
   27/27** (job 7199082 throttled run, 403; + 2 recovered by job 7199219 after
-  the parser fix). Servers `qdel`'d on completion. Verified TP/serving config,
+  the parser fix). The fused production job stops its `mpiexec` server
+  subprocesses on exit (no separate server jobs to `qdel`; the abandoned two-job
+  launcher was the path that `qdel`'d server jobs). Verified TP/serving config,
   the two production failure modes and their fixes (72B server overload →
   `DECRYPTO_MAX_WORKERS` throttle; `extract_json_answer` `None` crash → guard),
   the queue strategy (fused job on `capacity`), and the complete job ledger are
@@ -269,10 +271,13 @@ Rather than edit the Midway scripts in place, we wrote PBS-flavored copies
   bypass the relocated python).
 - **Paths.** All `/project/rcc/mehta5/...` → `/lus/eagle/projects/lighthouse-uchicago/members/mehta5/...`.
   This includes the legacy `agent_paths` table in `src/utils/server.py`
-  (2026-06-12): the staged keys (`llama3.1_70B`, `qwen3_8b`, `qwen3_4b`,
-  `qwen2.5_0.5B`) now point at `$BASE/models/...`; that table is read only by the
-  Slurm `squeue` branch (on Polaris, `model_id` travels inside each server's
-  discovery JSON), but stale Midway paths were fixed so no dead pointers remain.
+  (2026-06-12): the **staged** keys (`qwen2.5_72B`, `qwen3_8b`, `qwen3_4b`,
+  `qwen2.5_0.5B`) point at `$BASE/models/...` local paths. `llama3.1_70B` was
+  never staged (gated repo), so it keeps its `meta-llama/Meta-Llama-3.1-70B-Instruct`
+  HF repo id rather than a local path. That table is read only by the Slurm
+  `squeue` branch (on Polaris, `model_id` travels inside each server's discovery
+  JSON), but the stale Midway `/project/rcc/...` paths were fixed so no dead
+  local pointers remain.
 - **Offline + caches.** `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`, `HF_HOME` on
   eagle, serve a **local model path** — compute nodes have no internet.
 - **GPU memory.** A100 40 GB vs H200 140 GB: the 0.5B proved the pipeline at
@@ -344,6 +349,14 @@ Every log file under `logs/` mapped to its job and outcome (`logs/` is
 gitignored — enumerate with `ls logs/` / depth-limited `find logs -maxdepth 2`,
 never a cluster-wide `find`).
 
+> **Sourcing note.** Outcomes are corroborated by in-log signals that persist:
+> `run.py exit rc=...`, the `>>> vLLM healthy after Ns` / `FATAL ...` lines, KV-cache
+> lines, and the `.ER` `PBS: job killed: walltime ... exceeded` messages. Numeric
+> PBS `Exit_status=...` codes quoted in some rows below were read from
+> `qstat -x <jobid>` epilogues at the time and are **not** in the log files (PBS
+> has since purged those job records); treat them as best-effort, with the in-log
+> signal as the durable evidence.
+
 | Log file(s) | Job id | Queue | Model / TP | Outcome | Root cause / note |
 |---|---|---|---|---|---|
 | `logs/probe_wrap_7186959.log`, `logs/probe_nvidia-smi_7186959.txt`, `logs/7186959.*.OU/.ER` | 7186959 | debug | Qwen2.5-0.5B / TP1 | Successful | Toolchain probe: torch saw the A100, vLLM 0.8.4 loaded the 0.5B on V1 and generated; `Exit_status=0` |
@@ -361,15 +374,15 @@ never a cluster-wide `find`).
 | `logs/vllm/qwen3_8b-7197358.wrap.log`, `logs/vllm/7197358.*.OU/.ER` | 7197358 | preemptable | Qwen3-8B / TP1 | Partially successful | 2-model mechanics test server: preempted once and requeued by `-r y` (run_count=2), came healthy, registered, answered `ping_servers` (200 OK in its log); `qdel`'d by the experiment's failure path at 12:44 |
 | `logs/vllm/qwen3_4b-7197359.wrap.log`, `logs/vllm/7197359.*.OU/.ER` | 7197359 | preemptable | Qwen3-4B / TP1 | Unsuccessful | **Died at exactly its walltime while idle-serving** (stime 08:11:38 → obittime 09:42:25 = 1:30:47 ≈ walltime 01:30, `Exit_status=-29`, run_count=2): the dependent experiment never got a node while this server burned its clock. The queue-skew failure mode |
 | `logs/paper/polaris_smoke_7197360.log`, `logs/paper/7197360.*.OU/.ER` | 7197360 | preemptable | 2-model experiment | Unsuccessful | Ran (and was itself preempted/rerun) three times; in the final run only 1/2 servers still existed (the 4B had hit walltime) → `FATAL: only 1/2 servers ready after 1800s`, exit 46, correctly `qdel`'d the surviving server. Validated: dependency release, ready-poll, SEEDS passthrough (visible in env), failure-path qdel |
-| `logs/vllm/qwen3_8b-7197380.wrap.log`, `logs/vllm/7197380.*.OU/.ER` | 7197380 | preemptable | Qwen3-8B / TP1 | Unsuccessful | 3-model launch server: healthy in 37 s, registered `10.201.4.87:8421` — then died at exactly its walltime (stime 10:04:05 → obittime 12:35:10 ≈ 02:30, `Exit_status=-29`) while the experiment job was still queued. Cleanup removed its JSON |
-| `logs/vllm/qwen3_4b-7197381.wrap.log`, `logs/vllm/7197381.*.OU/.ER` | 7197381 | preemptable | Qwen3-4B / TP1 | Unsuccessful | Same walltime-skew death: healthy in 27 s, registered `10.201.4.160:8807`, died 12:13:27 after its full 02:30 walltime, experiment still queued |
+| `logs/vllm/qwen3_8b-7197380.wrap.log`, `logs/vllm/7197380.*.OU/.ER` | 7197380 | preemptable | Qwen3-8B / TP1 | Unsuccessful | 3-model launch server: healthy in 37 s, registered `10.201.4.104:8421` — then died at its walltime (its `.ER` shows `PBS: job killed: walltime ... exceeded limit`, ≈ 02:30) while the experiment job was still queued. Cleanup removed its JSON |
+| `logs/vllm/qwen3_4b-7197381.wrap.log`, `logs/vllm/7197381.*.OU/.ER` | 7197381 | preemptable | Qwen3-4B / TP1 | Unsuccessful | Same walltime-skew death: healthy in 27 s, registered `10.201.4.65:8807`, killed after its full 02:30 walltime (`.ER`: `job killed: walltime ... exceeded`), experiment still queued |
 | `logs/vllm/qwen2.5_72B-7197379.wrap.log`, `logs/vllm/7197379.*.OU/.ER` | 7197379 | preemptable | Qwen2.5-72B / TP4 | Partially successful | Started 12:44 (3.4 h queue skew after submission at 05:21), healthy, registered `7197379.json` at 12:49, answered the experiment's pings (the "1/3 ready") for an hour — then `qdel`'d by 7197382's failure path at 13:45. The 72B serving config itself worked over the two-job path |
 | `logs/paper/polaris_smoke_7197382.log`, `logs/paper/7197382.*.OU/.ER` | 7197382 | preemptable | 3-model experiment | Unsuccessful | Started 12:44 alongside the 72B, but the two Qwen3 servers had already died at their walltimes hours earlier; replacement servers (7197525/7197526, submitted 12:48 into the same SERVERS_DIR) were still queued when WAIT_TIMEOUT expired: `FATAL: only 1/3 servers ready after 3600s`, exit 46, qdel'd the surviving 72B. 7197525 started at almost that exact minute; both replacements were then qdel'd as orphans |
-| (no log — qdel'd while queued) | 7197525, 7197526, 7197528 | preemptable | replacements + fused copy | Aborted | 7197525/26: orphaned Qwen3 replacement servers, qdel'd after their experiment died. 7197528: preemptable copy of the fused smoke, qdel'd once the capacity copy started first |
+| `logs/vllm/qwen3_8b-7197525.wrap.log`, `logs/vllm/qwen3_4b-7197526.wrap.log` (7197528: no log) | 7197525, 7197526, 7197528 | preemptable | replacements + fused copy | Aborted | 7197525/26: Qwen3 replacement servers — these **did start** (7197525 came up on x3210c0s1b1n0 ~13:45) but were then orphaned and qdel'd once their experiment (7197382) had already failed. 7197528: preemptable copy of the fused smoke, qdel'd unrun once the capacity copy (7197574) started first |
 | `logs/paper/polaris_fused_7197574.log`, `logs/vllm/{qwen2.5_72B,qwen3_8b,qwen3_4b}-7197574.wrap.log`, `logs/paper/7197574.*.OU/.ER` | 7197574 | **capacity** | 3 servers + experiment, fused 4-node job | **Successful — rungs 3+4** | Started 1 min after submission. All 3 servers ready in **361 s** (one per node via `mpiexec --hosts`); ran the full **27-combination** cross-play matrix (1 seed × 1 episode); `run.py` rc=0; `results/polaris_3model_fused_cap/experiment_summary.csv` = 27 rows, verified to contain all 27 unique (encoder, decoder, interceptor) triples; per-combo dirs written incrementally. Total job 25 min. "FUSED RUN COMPLETE" |
 | (no log — stuck job, qdel'd) | 7197605 | capacity | production (16 h, 405 games) | Aborted | Sat ~32 h eligible with no estimated start (`would conflict with reservation or top job`); a 4-node × 16 h request could not backfill on the full 32-node queue. Cancelled and resubmitted shorter (7199012) |
-| `logs/paper/polaris_fused_7199012.log`, `logs/vllm/*-7199012.wrap.log`, `results/polaris_3model_overload_7199012/`, `logs/paper/7199012.*.OU/.ER` | 7199012 | **capacity** | production, fused 4-node, **405 games at full concurrency** | **Unsuccessful (incomplete: 245/405)** | Started ~2.5 h after submit (10 h walltime). 3 servers healthy in 360 s; ran the full 405-combination matrix in **1 h 39 m** (`run.py` rc=0, Exit_status=0). But `ProcessPoolExecutor(max_workers=405)` flooded the slow 72B server (KV ~18,800 tokens ≈ 2.3× concurrency): run log shows **312 `APITimeoutError`, 194×`503`, 156 "Error occurred with model qwen2.5_72B"** (vs 3 for qwen3_4b); the 72B server logged 716 aborts on 1,929 requests (~37%). Only **245/405** summary rows landed; the missing ~40% are systematically the 72B-involving games (all-Qwen3 combos 14–15/15 present; `72B`-as-encoder combos as low as 1/15). Gameplay quality where it ran was high. Root cause: server-concurrency overload, **not** model capability. Partial results preserved at `results/polaris_3model_overload_7199012/` |
-| `logs/paper/polaris_fused_7199082.log`, `logs/vllm/*-7199082.wrap.log`, `results/polaris_3model/` | 7199082 | **capacity** | production, fused 4-node, **405 games throttled to 24 concurrent** | **Successful (403/405)** | With `DECRYPTO_MAX_WORKERS=24`: started ~10 min after submit, 3 servers ready in 360 s, ran in **2 h 34 m** (`run.py` rc=0, Exit_status=0). Throttle clean — **0 server aborts on 1,736 72B requests, 0 APITimeoutError, 0 model timeouts** (vs 716 aborts unthrottled). **403/405** rows: the 2 drops (seed 10 + seed 12, both a Qwen3 interceptor) are a parser bug — `extract_json_answer` ran `re.search` on `None` content when the model returned an empty generation. Coverage went 245→403 purely from the throttle |
+| `logs/paper/polaris_fused_7199012.log`, `logs/vllm/*-7199012.wrap.log`, `results/polaris_3model_overload_7199012/`, `logs/paper/7199012.*.OU/.ER` | 7199012 | **capacity** | production, fused 4-node, **405 games at full concurrency** | **Unsuccessful (incomplete: 245/405)** | Started ~2.5 h after submit (10 h walltime). 3 servers healthy in 360 s; ran the full 405-combination matrix (`run.py` rc=0; run.py self-timed 5,541 s = **1 h 32 m**, whole job 1 h 39 m). But `ProcessPoolExecutor(max_workers=405)` flooded the slow 72B server (KV ~18,800 tokens ≈ 2.3× concurrency): run log shows **312 `APITimeoutError`** and **156 "Error occurred with model qwen2.5_72B"** (vs 3 for qwen3_4b), and the 72B server logged **610 aborted requests on 1,929 (~32%)**. Only **245/405** summary rows landed; the missing 160 games were **all** dropped by the same `extract_json_answer(None)` `TypeError` (see note below), and the gap is systematically the 72B-involving games (all-Qwen3 combos 14–15/15 present; `72B`-as-encoder combos as low as 1/15). Gameplay quality where it ran was high. Root cause: server-concurrency overload, **not** model capability. Partial results preserved at `results/polaris_3model_overload_7199012/` |
+| `logs/paper/polaris_fused_7199082.log`, `logs/vllm/*-7199082.wrap.log`, `results/polaris_3model/` | 7199082 | **capacity** | production, fused 4-node, **405 games throttled to 24 concurrent** | **Successful (403/405)** | With `DECRYPTO_MAX_WORKERS=24`: started ~10 min after submit, 3 servers ready in 360 s (`run.py` rc=0; run.py self-timed 8,851 s = **2 h 27 m**, whole job 2 h 34 m). Throttle clean — **0 server aborts on 1,736 72B requests, 0 `APITimeoutError`** (vs 610 aborts unthrottled). Two non-fatal `HTTP 400` context-length errors occurred (Qwen3-8B: prompt + 2000 reasoning tokens exceeded `max_model_len` 8192 on long late-game prompts) but dropped no games. **403/405** rows: the 2 drops (seed 10 + seed 12, both a Qwen3 interceptor) hit the same `extract_json_answer(None)` crash, here triggered by a genuine empty generation rather than a timeout. Coverage went 245→403 purely from the throttle |
 | `logs/paper/polaris_fused_7199219.log`, `results/polaris_3model_fix2/` | 7199219 | **capacity** | seeds 10+12 rerun (54 games) with the None-guard fix | **Successful (recovered both targets)** | With the `extract_json_answer` None-guard: seed 12 now 27/27 (the None-parse game recovered) and seed 10's originally-missing game present. 52/54 rows here (2 *different* seed-10 games hit a transient `ProcessPoolExecutor` "process terminated abruptly" worker death — unrelated to the parse bug), but those combos were already present in the main run, so the **union covers all 405**. Merged → `results/polaris_3model/experiment_summary.csv` = **405/405**, every seed 27/27 (provenance: 403 main + 2 rerun) |
 
 ---
@@ -626,20 +639,31 @@ never a cluster-wide `find`).
   missing seeds. Tracking the completion curve to project the finish.
 - **2026-06-14 — Rung 5 attempt 1 (7199012) completed but INCOMPLETE: 72B
   server overload at full concurrency (245/405 games).** The early-rate worry
-  was unfounded — the run finished in 1 h 39 m (the rate climbed sharply as the
+  was unfounded — the matrix finished in 1 h 32 m of run.py time, 1 h 39 m whole
+  job (the rate climbed sharply as the
   405-way pool drained). But only 245 of 405 summary rows landed, and the
   pattern was diagnostic: the 8 all-Qwen3 combos (no 72B) were present in
   14–15/15 seeds, while combos involving qwen2.5_72B fell off progressively,
   worst when the 72B was the **encoder** (the role that calls every turn) — as
-  low as 1/15. The run log shows 312 `APITimeoutError`, 194×`503`, and 156 of
-  the ~160 game failures naming `qwen2.5_72B`; the 72B server logged 716 aborts
-  on 1,929 requests. **Root cause: server-concurrency overload, not model
-  capability** — `run_experiments` uses `ProcessPoolExecutor(max_workers=
-  total_experiments)`, so all 405 games hammered the three servers at once and
-  the slow 72B (KV ~18,800 tokens ≈ 2.3× concurrency at 8192) could not keep up;
-  timed-out/503'd requests raise past `role_client`'s retry list and the game
-  future is dropped with no result row (runner.py:1474). The 27-game smoke had
-  succeeded precisely because 27-way concurrency is within the 72B's capacity.
+  low as 1/15. The run log shows 312 `APITimeoutError` and 156 of the 160 game
+  failures naming `qwen2.5_72B`; the 72B server logged 610 aborted requests on
+  1,929 (~32%). (Note: there were **no** HTTP 503s — an earlier "194×503" figure
+  was a `grep -c "503"` substring artifact matching request-ids/ports; the only
+  HTTP statuses in the log are 200 and 400.) **Root cause: server-concurrency
+  overload, not model capability** — `run_experiments` uses
+  `ProcessPoolExecutor(max_workers=total_experiments)`, so all 405 games hammered
+  the three servers at once and the slow 72B (KV ~18,800 tokens ≈ 2.3×
+  concurrency at 8192) could not keep up. **Drop mechanism (verified):** an
+  `APITimeoutError` is *not* in `role_client`'s retry list, so the client
+  swallows it and returns `None`; `extract_json_answer(None)` then raised
+  `TypeError: expected string or bytes-like object` and the whole game future was
+  dropped with no result row. All 160 drops were this one exception — the *same*
+  crash site as the two later "parser-bug" drops, so the throttle and the
+  None-guard are not independent fixes: the throttle removes the timeouts that
+  produce the `None`, the guard stops a `None` from crashing the parser. (HTTP
+  503 *is* in the retry list, so it would have been retried, not dropped — but no
+  503s occurred anyway.) The 27-game smoke had succeeded precisely because 27-way
+  concurrency is within the 72B's capacity.
   **Fix:** added an opt-in `DECRYPTO_MAX_WORKERS` cap to `run_experiments`
   (default unset = original one-worker-per-combination behavior; semantics
   unchanged, only parallelism throttled) and set it to **24** in
@@ -649,9 +673,14 @@ never a cluster-wide `find`).
   Operational lesson for self-hosted serving: match game concurrency to the
   **slowest** server's KV-cache capacity, not the number of combinations.
 - **2026-06-14 — Rung 5 attempt 2 (7199082) Successful at 403/405; throttle
-  validated.** With `DECRYPTO_MAX_WORKERS=24` the run completed in 2 h 34 m with
-  **zero server aborts** (1,736 72B requests), zero timeouts, zero model errors —
-  the overload is fully resolved (coverage 245 → 403). Wall-clock note: the
+  validated.** With `DECRYPTO_MAX_WORKERS=24` the run completed in 2 h 27 m of
+  run.py time (2 h 34 m whole job) with **zero server aborts** (1,736 72B
+  requests) and **zero `APITimeoutError`** — the overload is fully resolved
+  (coverage 245 → 403). Two non-fatal `HTTP 400` context-length errors occurred
+  (Qwen3-8B: a long late-game prompt plus the 2000-token reasoning budget
+  exceeded `max_model_len` 8192); they dropped no games but are a real
+  configuration edge worth noting (raise `max_model_len` or lower
+  `max_reasoning_tokens` to remove them). Wall-clock note: the
   apparent 0.6 games/min at 45 min was an artifact of a ~32 min initial "fill"
   (the first 24 launched games are the longest and none complete until then);
   steady state was far faster, hence the 2.5 h finish. The walltime could not be

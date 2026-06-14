@@ -335,10 +335,12 @@ scales seeds/episodes and the wall clock.
   spawns **one process per game** (`ProcessPoolExecutor(max_workers=total
   games)`). Run all 405 games at once and they flood the slow 72B server
   (KV cache ~18,800 tokens ≈ 2.3× concurrency): job 7199012 lost ~40% of games —
-  almost all of them 72B-involving — to `APITimeoutError`/`503` and wrote only
-  245/405 rows. The fused script sets `DECRYPTO_MAX_WORKERS=24` (below the
-  27-game smoke's proven-safe load) so the 72B is never overwhelmed; the run
-  trades wall-clock (~5 h vs ~1.6 h) for completeness. **Match game concurrency
+  almost all of them 72B-involving — when overloaded requests hit
+  `APITimeoutError`, returned `None`, and crashed the answer parser; it wrote
+  only 245/405 rows (610 aborted requests on the 72B server). The fused script
+  sets `DECRYPTO_MAX_WORKERS=24` (below the 27-game smoke's proven-safe load) so
+  the 72B is never overwhelmed; the run trades wall-clock (~2.5 h vs ~1.5 h) for
+  completeness. **Match game concurrency
   to the slowest server's KV capacity, not the combination count.** Default
   (env unset) preserves the original one-worker-per-game behavior.
 - **`pids.max=4096`.** With `OMP_NUM_THREADS=1` (set by the fused script) and
