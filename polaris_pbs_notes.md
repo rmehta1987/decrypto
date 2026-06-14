@@ -588,6 +588,27 @@ never a cluster-wide `find`).
   written incrementally under `results/polaris_3model/`, so even a walltime
   overrun yields recoverable partial data. If 7199012 also fails to get an ETA,
   the fallback is `preemptable` (the fused job is atomic with `#PBS -r y`).
+- **2026-06-14 — Rung 5 production started (job 7199012, capacity).** The 10 h
+  resubmission landed on nodes `x3004c0s*` ~2.5 h after submission (vs the 16 h
+  job's 32 h stall — the walltime cut was the fix). All three servers healthy on
+  schedule: 72B 326 s, Qwen3-8B 39 s, Qwen3-4B 28 s, all 3 ready in 360 s
+  (matching the smoke); the **405-combination** matrix (15 seeds × 27 combos,
+  `num_episodes: 1`) launched. **Gameplay is competent**, confirming the model
+  upgrade achieved the experiment's purpose: e.g. with keywords {1:boat,
+  2:direction, 3:viking, 4:foot} an encoder hinted `boat→sail/ship`,
+  `viking→war/norse/raid`, `foot→step/leg`, `direction→way/compass`, and the
+  decoder guessed the codes correctly while the interceptor was foiled — a stark
+  contrast to the 0.5B smoke's JSON-retry garbage. The Qwen3 two-stage thinking
+  budget is visibly working (a `<think>` block reasons through hint choices, then
+  the answer call emits the `ANSWER:` JSON).
+- **2026-06-14 — Walltime cannot be extended mid-run.** Early sampling (~16
+  games done at ~26 min, peak-concurrency phase) projected a possible brush
+  against the 10 h limit, so attempted `qalter -l walltime=15:00:00 7199012` —
+  rejected by an ALCF `account_check` hook (`Exception in account_check hook`).
+  The run is fixed at 10 h. Mitigation: per-game result dirs write incrementally
+  under `results/polaris_3model/`, so a walltime kill loses only in-flight games
+  and the completed seeds remain analyzable; a follow-up job can cover any
+  missing seeds. Tracking the completion curve to project the finish.
 - **2026-06-12 — Derived the TP plan from staged `config.json` files** (see the
   staged-models table): Qwen3-8B/-4B have 32 attention / 8 KV heads → TP=1
   (single 40 GB card holds 16/8 GB of weights with ample KV headroom);
