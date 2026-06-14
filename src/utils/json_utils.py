@@ -8,6 +8,11 @@ import json
 import re
 
 def extract_json_answer(content):
+    # A model may return no/empty content (observed: Qwen3 occasionally yields
+    # None content). Treat that as "no parseable answer" so the caller's
+    # retry/default-answer path handles it, instead of crashing re.search on None.
+    if not content:
+        return None
     json_match = re.search(r"ANSWER:\s*(\{.*\})", content, re.DOTALL)
     if json_match:
         try:

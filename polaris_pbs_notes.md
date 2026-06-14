@@ -358,7 +358,8 @@ never a cluster-wide `find`).
 | `logs/paper/polaris_fused_7197574.log`, `logs/vllm/{qwen2.5_72B,qwen3_8b,qwen3_4b}-7197574.wrap.log`, `logs/paper/7197574.*.OU/.ER` | 7197574 | **capacity** | 3 servers + experiment, fused 4-node job | **Successful — rungs 3+4** | Started 1 min after submission. All 3 servers ready in **361 s** (one per node via `mpiexec --hosts`); ran the full **27-combination** cross-play matrix (1 seed × 1 episode); `run.py` rc=0; `results/polaris_3model_fused_cap/experiment_summary.csv` = 27 rows, verified to contain all 27 unique (encoder, decoder, interceptor) triples; per-combo dirs written incrementally. Total job 25 min. "FUSED RUN COMPLETE" |
 | (no log — stuck job, qdel'd) | 7197605 | capacity | production (16 h, 405 games) | Aborted | Sat ~32 h eligible with no estimated start (`would conflict with reservation or top job`); a 4-node × 16 h request could not backfill on the full 32-node queue. Cancelled and resubmitted shorter (7199012) |
 | `logs/paper/polaris_fused_7199012.log`, `logs/vllm/*-7199012.wrap.log`, `results/polaris_3model_overload_7199012/`, `logs/paper/7199012.*.OU/.ER` | 7199012 | **capacity** | production, fused 4-node, **405 games at full concurrency** | **Unsuccessful (incomplete: 245/405)** | Started ~2.5 h after submit (10 h walltime). 3 servers healthy in 360 s; ran the full 405-combination matrix in **1 h 39 m** (`run.py` rc=0, Exit_status=0). But `ProcessPoolExecutor(max_workers=405)` flooded the slow 72B server (KV ~18,800 tokens ≈ 2.3× concurrency): run log shows **312 `APITimeoutError`, 194×`503`, 156 "Error occurred with model qwen2.5_72B"** (vs 3 for qwen3_4b); the 72B server logged 716 aborts on 1,929 requests (~37%). Only **245/405** summary rows landed; the missing ~40% are systematically the 72B-involving games (all-Qwen3 combos 14–15/15 present; `72B`-as-encoder combos as low as 1/15). Gameplay quality where it ran was high. Root cause: server-concurrency overload, **not** model capability. Partial results preserved at `results/polaris_3model_overload_7199012/` |
-| `logs/paper/polaris_fused_7199082.log`, `logs/vllm/*-7199082.wrap.log`, `results/polaris_3model/` | 7199082 | **capacity** | production, fused 4-node, **405 games throttled to 24 concurrent** | In progress | Resubmit with `DECRYPTO_MAX_WORKERS=24` (opt-in cap added to `runner.py`) so the 72B sees the smoke's proven-safe load |
+| `logs/paper/polaris_fused_7199082.log`, `logs/vllm/*-7199082.wrap.log`, `results/polaris_3model/` | 7199082 | **capacity** | production, fused 4-node, **405 games throttled to 24 concurrent** | **Successful (403/405)** | With `DECRYPTO_MAX_WORKERS=24`: started ~10 min after submit, 3 servers ready in 360 s, ran in **2 h 34 m** (`run.py` rc=0, Exit_status=0). Throttle clean — **0 server aborts on 1,736 72B requests, 0 APITimeoutError, 0 model timeouts** (vs 716 aborts unthrottled). **403/405** rows: the 2 drops (seed 10 + seed 12, both a Qwen3 interceptor) are a parser bug — `extract_json_answer` ran `re.search` on `None` content when the model returned an empty generation. Coverage went 245→403 purely from the throttle |
+| `logs/paper/polaris_fused_7199219.log`, `results/polaris_3model_fix2/` | 7199219 | **capacity** | seeds 10+12 rerun (54 games) with the None-guard fix | In progress | Targeted rerun after guarding `extract_json_answer` against `None`; recovers the 2 dropped games → merge to 405/405 |
 
 ---
 
@@ -636,6 +637,31 @@ never a cluster-wide `find`).
   as **7199082**. Expected wall-clock at 24-way ≈ 5 h (well within 10 h).
   Operational lesson for self-hosted serving: match game concurrency to the
   **slowest** server's KV-cache capacity, not the number of combinations.
+- **2026-06-14 — Rung 5 attempt 2 (7199082) Successful at 403/405; throttle
+  validated.** With `DECRYPTO_MAX_WORKERS=24` the run completed in 2 h 34 m with
+  **zero server aborts** (1,736 72B requests), zero timeouts, zero model errors —
+  the overload is fully resolved (coverage 245 → 403). Wall-clock note: the
+  apparent 0.6 games/min at 45 min was an artifact of a ~32 min initial "fill"
+  (the first 24 launched games are the longest and none complete until then);
+  steady state was far faster, hence the 2.5 h finish. The walltime could not be
+  extended mid-run (`qalter` rejected by the same ALCF `account_check` hook on
+  both jobs), but 10 h was ample.
+- **2026-06-14 — Fixed a latent parser bug (`extract_json_answer` on `None`).**
+  The 2 dropped games (seed 10, seed 12, both a Qwen3 interceptor) were not a
+  server issue: when a model returns empty/`None` content, `extract_json_answer`
+  called `re.search(pattern, None)` → `TypeError: expected string or bytes-like
+  object, got 'NoneType'`, which propagated up and dropped the whole game (no
+  result row). An empty response should instead be treated as "no parseable
+  answer" and flow into the existing retry → default-answer path (the same way
+  the 0.5B's malformed JSON was handled). Fix: a one-line guard
+  `if not content: return None` at the top of `extract_json_answer`
+  (`src/utils/json_utils.py`); unit-tested that `None`/`""` return `None` and
+  valid/junk inputs are unchanged. Recovering the 2 games needs the fix plus a
+  rerun (the failures are deterministic at `temperature=0`, so a plain rerun
+  would reproduce them), so submitted a targeted rerun of seeds 10+12
+  (`exp_name=polaris_3model_fix2`, job 7199219) to merge to 405/405. The
+  403-row CSV is preserved at
+  `results/polaris_3model/experiment_summary_403rows_pre_fix.csv`.
 - **2026-06-12 — Derived the TP plan from staged `config.json` files** (see the
   staged-models table): Qwen3-8B/-4B have 32 attention / 8 KV heads → TP=1
   (single 40 GB card holds 16/8 GB of weights with ample KV headroom);
