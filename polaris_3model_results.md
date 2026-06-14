@@ -17,6 +17,8 @@ artifacts; the numbers below are the committed record).
 
 ![outcome split](results/polaris_3model/figures/fig1_outcome_split.png)
 
+*How the 405 games ended. The two-player team rarely won, and when it lost it was almost always because the clues revealed the secret code to the opponent, rather than because the teammate misread them.*
+
 | Outcome | Games | Share | Interpretation |
 |---|---|---|---|
 | Team **survived** (team win) | 11 | **2.7%** | balanced clarity vs. secrecy |
@@ -34,6 +36,8 @@ Games end fast (mean 4.4 turns; the interceptor reaches two interceptions by
 
 ![interceptor defense-win with CI](results/polaris_3model/figures/fig2_interceptor_ci.png)
 
+*How often the opponent won, depending on which model played the lone code-cracker. The largest model won every one of its games; the smaller two let a few teams through. The vertical lines show how much each number could move given only 135 games apiece, so the gap is a hint, not a settled fact.*
+
 | Interceptor | Defense-win rate | 95% Wilson CI | Team wins it allowed |
 |---|---|---|---|
 | Qwen2.5-72B | 135/135 = **100.0%** | [97.2, 100.0] | **0** |
@@ -48,6 +52,8 @@ here the CIs overlap at N=135; treat it as suggestive, not established.
 
 ![encoder/decoder marginals with CI](results/polaris_3model/figures/fig3_team_marginals_ci.png)
 
+*How often the team won, split by which model wrote the clues and which model read them. The three models land in about the same place and their ranges overlap, so the differences are within chance — this is not a ranking.*
+
 | Model | as Encoder (team-survival) | as Decoder (team-survival) |
 |---|---|---|
 | Qwen2.5-72B | 3.7% [1.6, 8.4] | 3.0% [1.2, 7.4] |
@@ -56,6 +62,19 @@ here the CIs overlap at N=135; treat it as suggestive, not established.
 
 Every interval overlaps every other. As encoder or decoder the three models are
 not distinguishable on this data — **do not read these as a ranking.**
+
+## Where the few wins came from — every match-up at a glance
+
+![team vs opponent heatmap](results/polaris_3model/figures/fig4_team_vs_opponent_heatmap.png)
+
+*Each square is one match-up: a team (a clue-writer plus a teammate, one per row) against a single opponent (one per column), played over 15 games. The number is how many of those 15 the team won. Almost every square is zero; the wins are scattered against the two smaller opponents, and the entire Qwen2.5-72B column is blank — the team never won a single game when the largest model was the one trying to crack the code.*
+
+This is the full 9-teams × 3-opponents grid behind the 11 team wins. Two things
+stand out and neither is visible in any flat table: the wins are sparse and
+scattered (no team is reliably good), and the strongest model as the opponent
+produced a clean shutout (45 games, zero team wins). The single darkest square —
+the all-Qwen3-4B team beating the Qwen3-8B opponent 3 times out of 15 — is the
+best any pairing managed, which is itself a statement about how hard the task is.
 
 ## Adversarial caveats (read before citing any number)
 
