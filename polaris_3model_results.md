@@ -7,12 +7,6 @@ by `analysis/plot_polaris_3model.py` into `results/polaris_3model/figures/`
 (both that directory and `*.png` are gitignored — the figures are build
 artifacts; the numbers below are the committed record).
 
-> **Why not a 405-row table.** The outcome is overwhelmingly one-sided, so a flat
-> dump would bury the result and invite over-reading 1–2-game differences as
-> signal. The raw CSV is the reproducibility appendix; communication uses the
-> aggregated, uncertainty-aware views below. N is small (15 setups per
-> combination), so every rate is reported with a 95% Wilson confidence interval.
-
 ## Headline — how 405 games ended
 
 ![outcome split](results/polaris_3model/figures/fig1_outcome_split.png)
