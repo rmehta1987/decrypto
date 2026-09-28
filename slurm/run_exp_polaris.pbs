@@ -37,10 +37,9 @@ exec > >(stdbuf -oL -eL tee -a "$WRAP_LOG") 2>&1
 echo "=== experiment $PBS_JOBID on $(hostname) at $(date) ==="
 echo "DECRYPTO_SERVERS_FILE=${DECRYPTO_SERVERS_FILE:-<unset>}  EXPECTED_MODELS=${EXPECTED_MODELS:-1}"
 
-# ── Modules + node-local scratch ──
-module use /soft/modulefiles
-module load conda/2025-09-25
-conda activate base
+# ── Node-local scratch. No conda module: the venv is hand-activated and its
+#    interpreter is checked directly (see slurm/start_vllm_server_node.sh). ──
+source "$REPO_ROOT/slurm/polaris_preflight.sh"
 unset TMPDIR
 NODE_SCRATCH=/local/scratch
 [ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp
@@ -53,6 +52,7 @@ if [ ! -f "$VENV_TARBALL" ]; then echo "FATAL: venv tarball not found: $VENV_TAR
 LOCAL_VENV="$TMPDIR/decrypto-serve"
 mkdir -p "$LOCAL_VENV"
 tar xf "$VENV_TARBALL" -C "$LOCAL_VENV"
+decrypto_venv_preflight "$LOCAL_VENV" || exit 3
 export VIRTUAL_ENV="$LOCAL_VENV"
 export PATH="$LOCAL_VENV/bin:$PATH"
 hash -r

@@ -50,10 +50,9 @@ exec > >(stdbuf -oL -eL tee -a "$WRAP_LOG") 2>&1
 
 echo "=== probe $PBS_JOBID on $(hostname) at $(date) ==="
 
-echo ">>> phase: modules"
-module use /soft/modulefiles
-module load conda/2025-09-25
-conda activate base
+# No conda module: the venv is hand-activated and its interpreter is checked
+# directly (see slurm/start_vllm_server_node.sh for why the module is not loaded).
+source "$REPO_ROOT/slurm/polaris_preflight.sh"
 
 # ── Node-local scratch (RAID0 SSD); set EARLY (venv tarball extracts into it).
 #    Scrub any inherited TMPDIR; fall back to /tmp if /local/scratch is absent. ──
@@ -77,6 +76,7 @@ mkdir -p "$LOCAL_VENV"
 _t0=$SECONDS
 tar xf "$VENV_TARBALL" -C "$LOCAL_VENV"
 echo "    extracted $(du -sh "$LOCAL_VENV" 2>/dev/null | cut -f1) in $((SECONDS-_t0))s"
+decrypto_venv_preflight "$LOCAL_VENV" || exit 3
 
 # Activate MANUALLY (do NOT `source bin/activate` — a relocated venv's activate
 # hardcodes the original build path). Prepending bin/ to PATH makes the relocated

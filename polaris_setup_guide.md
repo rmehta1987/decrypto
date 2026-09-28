@@ -29,7 +29,7 @@ cover the multi-model cross-play experiment and long production sessions.
 | CPU / RAM | AMD EPYC Milan, 64 threads (`ncpus=64`), 512 GiB |
 | Required select line | `-l select=1:ncpus=64:ngpus=4` (do **not** add `:system=polaris`) |
 | Required filesystems | `-l filesystems=home:eagle` (PBS rejects jobs that omit it) |
-| Conda module | `module use /soft/modulefiles && module load conda/2025-09-25 && conda activate base` |
+| Conda module | Venv **build only** (login node): `module use /soft/modulefiles && module load conda/2025-09-25 && conda activate base`. Job scripts do **not** load it (since 2026-09-28): the venv is hand-activated and its python symlinks straight into `/soft/applications/conda/2025-09-25/mconda3`, which `slurm/polaris_preflight.sh` checks |
 | Member base (`$BASE`) | `/lus/eagle/projects/lighthouse-uchicago/members/mehta5` |
 | Project root | `$BASE/decrypto` |
 | Model store | `$BASE/models/` |

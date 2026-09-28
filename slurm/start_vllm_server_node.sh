@@ -24,9 +24,12 @@ WRAP_LOG="$REPO_ROOT/logs/vllm/${MODEL_KEY}-${JOBTAG}.wrap.log"
 exec > >(stdbuf -oL -eL tee -a "$WRAP_LOG") 2>&1
 echo "=== fused-node server $MODEL_KEY (job $JOBTAG) on $(hostname) at $(date) ==="
 
-module use /soft/modulefiles
-module load conda/2025-09-25
-conda activate base
+# No conda module: the venv is activated by hand below and its interpreter
+# resolves into the conda install tree directly (decrypto_venv_preflight). The
+# module is not needed at run time (7599882 served with it failing), and since
+# ALCF's 2026-09-16 rewrite it prepends /soft/libraries/nccl (2.28.3) to
+# LD_LIBRARY_PATH, which we don't want under vLLM's torch.
+source "$REPO_ROOT/slurm/polaris_preflight.sh"
 unset TMPDIR
 NODE_SCRATCH=/local/scratch
 [ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp
@@ -39,6 +42,7 @@ mkdir -p "$LOCAL_VENV"
 _t0=$SECONDS
 tar xf "$VENV_TARBALL" -C "$LOCAL_VENV"
 echo "venv extracted in $((SECONDS-_t0))s"
+decrypto_venv_preflight "$LOCAL_VENV" || exit 3
 export VIRTUAL_ENV="$LOCAL_VENV"
 export PATH="$LOCAL_VENV/bin:$PATH"
 hash -r

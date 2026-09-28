@@ -79,7 +79,7 @@ bring-up and the [ALCF Polaris docs](https://docs.alcf.anl.gov/polaris/)
 | Filesystems | `home`, `eagle`. Jobs **must** declare `-l filesystems=home:eagle` or PBS rejects them |
 | Select line | `-l select=1:ncpus=64:ngpus=4` (do **not** add `:system=polaris`) |
 | Node-local scratch | `/local/scratch` (RAID0 SSD) — fast + writable; used for `TMPDIR` + venv staging. Falls back to `/tmp` |
-| Conda module | `module use /soft/modulefiles && module load conda/2025-09-25 && conda activate base` (venv built on top) |
+| Conda module | `module use /soft/modulefiles && module load conda/2025-09-25 && conda activate base` — venv **build only** since 2026-09-28; job scripts no longer load it (see the 2026-09-28 decisions-log entry) |
 | Native CUDA | `/soft/compilers/cudatoolkit/cuda-12.4.1`; driver 570.124.06 supports CUDA 12.8 → cu124 wheels are safe |
 | Member base | `/lus/eagle/projects/lighthouse-uchicago/members/mehta5` (repo, venv, models, caches) |
 | Project root | `…/members/mehta5/decrypto` |
@@ -266,6 +266,8 @@ Rather than edit the Midway scripts in place, we wrote PBS-flavored copies
   activate …` → Polaris `module use /soft/modulefiles && module load
   conda/2025-09-25 && conda activate base`, then a **manually-activated**
   relocated venv staged from a tarball onto `/local/scratch` (see One-time setup).
+  (Since 2026-09-28 the job scripts skip the module and only hand-activate the
+  venv; the build script still loads it.)
   `vllm serve` is launched as `python -m vllm.entrypoints.openai.api_server`
   (the `vllm` console script's shebang hardcodes the eagle build path and would
   bypass the relocated python).
@@ -744,3 +746,30 @@ never a cluster-wide `find`).
   `config/examples/local_polaris_3model.yaml`. Fixed the stale Midway
   `agent_paths` in `src/utils/server.py` (legacy `squeue`-only table; dir-merge
   loader re-verified with an ad-hoc unit test).
+- **2026-09-28 — Job scripts stop loading the conda module (port of MARSHAL's
+  environment findings; `HANDOFF_POLARIS_NCCL_ENV_2026-09-28.md` §3A.1).**
+  History: the 2026-08 Cray PE roll broke `module load conda/2025-09-25`. Job
+  7599882's server log (2026-09-09) records the exact error, `Lmod has detected
+  the following error: The following module(s) are unknown: "gcc-native/14.2"
+  "cray-hdf5-parallel/1.14.3.5"`, followed by `conda: command not found` from
+  `conda activate base`. The servers came up anyway (72B healthy after 524 s, 4B
+  after 139 s; vLLM reported `nccl==2.21.5`), so the module was never needed at
+  run time. ALCF rewrote the modulefiles on 2026-09-16 (`/soft/modulefiles/conda/*.lua`
+  mtimes). On the login node on 2026-09-28 the three lines succeed again
+  (`module load` rc 0, `conda activate` rc 0, python 3.12.11), but compute-node
+  behaviour is UNVERIFIED until the smoke below. The fixed `2025-09-25.lua` now
+  also prepends `/soft/libraries/nccl/nccl_2.28.3-1+cuda12.9_x86_64/lib` to
+  `LD_LIBRARY_PATH` (and sets `CC=/usr/bin/gcc-14`, `CUDA_HOME=cuda-12.9.1`,
+  `http(s)_proxy`). **Decision (operator, 2026-09-28):** drop the module from
+  every job script (`start_vllm_server_node.sh`, `server_vllm_polaris.pbs`,
+  `smoke_polaris.pbs`, `probe_vllm_polaris.pbs`, `run_exp_polaris.pbs`,
+  `fused_3model_polaris.pbs`). The build script keeps it, because it needs
+  conda's python to create the venv. That dependency now runs the other way: the
+  venv's `bin/python` symlinks to
+  `/soft/applications/conda/2025-09-25/mconda3/bin/python` (→ `python3.12`). So
+  each script now runs `decrypto_venv_preflight` (`slurm/polaris_preflight.sh`)
+  after extracting the tarball, and exits 3 if the interpreter does not resolve.
+  Without that check, a moved conda tree would break every tarball venv silently.
+  (NCCL note, PREDICTED: `libtorch_cuda.so` carries DT_**RPATH**
+  `$ORIGIN/../../nvidia/nccl/lib`, which is searched before `LD_LIBRARY_PATH`,
+  so even with the module loaded torch should keep the wheel's 2.21.5.)
