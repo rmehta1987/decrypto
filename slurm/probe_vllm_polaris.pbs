@@ -95,6 +95,8 @@ export TRITON_CACHE_DIR="$BASE/triton_cache"
 export TORCHINDUCTOR_CACHE_DIR="$BASE/torchinductor_cache"
 mkdir -p "$HF_HOME" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
 
+decrypto_comm_stack_header
+
 echo "=== Stage 0: nvidia-smi (backgrounded; it has hung in D-state on bad nodes) ==="
 ( timeout 30 nvidia-smi > "$REPO_ROOT/logs/probe_nvidia-smi_${PBS_JOBID%%.*}.txt" 2>&1 & ) || true
 sleep 5

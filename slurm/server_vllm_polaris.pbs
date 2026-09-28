@@ -117,6 +117,8 @@ cleanup() {
 }
 trap cleanup EXIT TERM INT
 
+decrypto_comm_stack_header
+
 # ── Launch vLLM via the MODULE entrypoint (NOT the `vllm` console script: its
 #    shebang hardcodes the eagle build path; the module form uses the relocated
 #    python on PATH). --enforce-eager for the smoke (skips torch.compile autotune

@@ -115,6 +115,8 @@ cleanup() {
 }
 trap cleanup EXIT TERM INT
 
+decrypto_comm_stack_header
+
 # ── Launch vLLM (module entrypoint; relocated venv can't use the `vllm` shebang) ──
 EXTRA_ARGS=()
 [ -n "$MAX_NUM_BATCHED_TOKENS" ] && EXTRA_ARGS+=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")

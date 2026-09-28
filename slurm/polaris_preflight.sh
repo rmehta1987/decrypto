@@ -20,3 +20,23 @@ decrypto_venv_preflight() {  # $1 = extracted venv dir
     fi
     echo "venv interpreter: $venv/bin/python -> $real"
 }
+
+# The comm stack a server actually runs with, for its log header: the NCCL torch
+# loaded (version + the .so it mapped), every NCCL_*/FI_* variable, and
+# LD_LIBRARY_PATH. This is the baseline to diff against if a model ever spans
+# nodes (HANDOFF_POLARIS_NCCL_ENV_2026-09-28.md §3C). Informational only: it
+# never fails the job. Call after the venv's python is first on PATH.
+decrypto_comm_stack_header() {
+    local vars
+    echo "--- comm stack on $(hostname) ---"
+    python - <<'PY' || echo "  WARNING: could not query torch's NCCL (continuing)"
+import torch
+v = torch.cuda.nccl.version()
+lib = next((l.split()[-1] for l in open("/proc/self/maps") if "libnccl" in l), "<libnccl not mapped>")
+print("  torch", torch.__version__, "| NCCL", ".".join(map(str, v)) if isinstance(v, tuple) else v, "|", lib)
+PY
+    vars="$(env | grep -E '^(NCCL|FI)_' | sort)"
+    if [ -n "$vars" ]; then echo "$vars" | sed 's/^/  /'; else echo "  NCCL_*/FI_*: (none set)"; fi
+    echo "  LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
+    echo "---"
+}

@@ -73,6 +73,8 @@ cleanup() {
 }
 trap cleanup EXIT TERM INT
 
+decrypto_comm_stack_header
+
 EXTRA_ARGS=()
 [ -n "$MNBT" ] && EXTRA_ARGS+=(--max-num-batched-tokens "$MNBT")
 [ -n "$MNSEQS" ] && EXTRA_ARGS+=(--max-num-seqs "$MNSEQS")
