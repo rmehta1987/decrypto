@@ -75,6 +75,10 @@ mnbts=(2048 "" "")
 mnseqs=(64 "" "")
 ports=(8101 8102 8103)
 
+# Every model must be staged before any node is spent loading one.
+source "$REPO_ROOT/slurm/polaris_preflight.sh"
+for p in "${model_paths[@]}"; do decrypto_model_path_check "$p" || exit 2; done
+
 SERVERS_DIR="$REPO_ROOT/logs/servers/fused_${JOBTAG}"
 mkdir -p "$SERVERS_DIR"
 export DECRYPTO_SERVERS_FILE="$SERVERS_DIR"
@@ -104,7 +108,6 @@ done
 # ── Meanwhile prepare the experiment env on THIS node (CPU/HTTP only). No conda
 #    module: the venv is hand-activated and its interpreter is checked directly
 #    (see slurm/start_vllm_server_node.sh). ──
-source "$REPO_ROOT/slurm/polaris_preflight.sh"
 unset TMPDIR
 NODE_SCRATCH=/local/scratch
 [ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp

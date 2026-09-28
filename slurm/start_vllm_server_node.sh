@@ -30,6 +30,7 @@ echo "=== fused-node server $MODEL_KEY (job $JOBTAG) on $(hostname) at $(date) =
 # ALCF's 2026-09-16 rewrite it prepends /soft/libraries/nccl (2.28.3) to
 # LD_LIBRARY_PATH, which we don't want under vLLM's torch.
 source "$REPO_ROOT/slurm/polaris_preflight.sh"
+decrypto_model_path_check "$MODEL_PATH" || exit 2
 unset TMPDIR
 NODE_SCRATCH=/local/scratch
 [ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp

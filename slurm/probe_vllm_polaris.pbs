@@ -53,6 +53,10 @@ echo "=== probe $PBS_JOBID on $(hostname) at $(date) ==="
 # No conda module: the venv is hand-activated and its interpreter is checked
 # directly (see slurm/start_vllm_server_node.sh for why the module is not loaded).
 source "$REPO_ROOT/slurm/polaris_preflight.sh"
+IFS=';' read -ra SPECS <<< "$MODEL_SPECS"
+for spec in "${SPECS[@]}"; do
+    decrypto_model_path_check "${spec%%:*}" || exit 2
+done
 
 # ── Node-local scratch (RAID0 SSD); set EARLY (venv tarball extracts into it).
 #    Scrub any inherited TMPDIR; fall back to /tmp if /local/scratch is absent. ──
@@ -119,7 +123,6 @@ echo ">>> torch probe rc=$rc"
 
 echo "=== Stage 3: vLLM can load + generate each model at its TP (enforce_eager) ==="
 PROBE_FAILED=0
-IFS=';' read -ra SPECS <<< "$MODEL_SPECS"
 for spec in "${SPECS[@]}"; do
     IFS=':' read -r MODEL TP GPU_MEM_UTIL MAX_MODEL_LEN MNBT MNSEQS <<< "$spec"
     TP="${TP:-1}"; GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"; MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"

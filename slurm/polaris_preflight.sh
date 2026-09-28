@@ -21,6 +21,17 @@ decrypto_venv_preflight() {  # $1 = extracted venv dir
     echo "venv interpreter: $venv/bin/python -> $real"
 }
 
+# A local model path that doesn't exist is not rejected by vLLM up front: it is
+# taken as a Hub repo id and fails only later under HF_HUB_OFFLINE, after the
+# venv is staged (and, in a fused job, after the other servers spent their load
+# time). Check each path before anything is launched.
+decrypto_model_path_check() {  # $1 = local model dir
+    if [ ! -f "$1/config.json" ]; then
+        echo "FATAL: model path missing or has no config.json: $1 (pre-stage it on a login node)"
+        return 1
+    fi
+}
+
 # The comm stack a server actually runs with, for its log header: the NCCL torch
 # loaded (version + the .so it mapped), every NCCL_*/FI_* variable, and
 # LD_LIBRARY_PATH. This is the baseline to diff against if a model ever spans

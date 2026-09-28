@@ -57,6 +57,7 @@ echo "=== smoke $PBS_JOBID ($MODEL_KEY) on $(hostname) at $(date) ==="
 #    the venv is hand-activated and its interpreter is checked directly (see
 #    slurm/start_vllm_server_node.sh for why the module is not loaded). ──
 source "$REPO_ROOT/slurm/polaris_preflight.sh"
+decrypto_model_path_check "$MODEL_PATH" || exit 2
 unset TMPDIR
 NODE_SCRATCH=/local/scratch
 [ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp

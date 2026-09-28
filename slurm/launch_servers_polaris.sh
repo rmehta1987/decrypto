@@ -104,9 +104,9 @@ if [ ${#ngpus[@]} -ne "$EXPECTED_MODELS" ] || [ ${#mem_utils[@]} -ne "$EXPECTED_
   echo "ngpus / mem_utils / max_lens / mnbts / mnseqs / models length mismatch"; exit 1
 fi
 
+source "$REPO_ROOT/slurm/polaris_preflight.sh"
 for i in "${!models[@]}"; do
-  p="${models[$i]#*:}"
-  if [ ! -d "$p" ]; then echo "model path missing (pre-stage it on a login node): $p"; exit 1; fi
+  decrypto_model_path_check "${models[$i]#*:}" || exit 1
 done
 
 if [ ! -f "$VENV_TARBALL" ]; then
