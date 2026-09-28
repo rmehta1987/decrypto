@@ -1,0 +1,146 @@
+#!/bin/bash
+# Polaris 1-node smoke for the 2026-09-28 environment changes
+# (HANDOFF_POLARIS_NCCL_ENV_2026-09-28.md §4 A2/A3). Exercises the PRODUCTION
+# server path -- slurm/start_vllm_server_node.sh launched via `mpiexec --hosts`,
+# exactly as the fused jobs do -- with one small model, then records what the
+# conda module does on a compute node now.
+#
+#   1. Server: Qwen3-4B TP=1 via the node bootstrap (no conda module, venv
+#      interpreter pre-flight, model-path check, comm-stack header).
+#      PASS needs: registered healthy + one real chat completion + the header's
+#      "| NCCL <ver> | <lib>" line in the server log.
+#   2. Record only (never fails the job): the three conda lines the job scripts
+#      used to run, as-is, with their rc -- and, under that module environment,
+#      which NCCL the venv's torch loads (the module puts ALCF's 2.28.3 on
+#      LD_LIBRARY_PATH; torch's DT_RPATH predicts the wheel's 2.21.5 still wins).
+#
+# Submit:  qsub slurm/smoke_node_env_polaris.pbs            (preemptable default)
+#          qsub -q debug slurm/smoke_node_env_polaris.pbs   (when a debug slot is free)
+# PASS token: DECRYPTO_NODE_ENV_SMOKE_OK
+#
+# (PBS reads only lines starting with "#PBS"; annotations go on the line ABOVE.)
+#PBS -N decrypto-envsmoke
+#PBS -A lighthouse-uchicago
+#PBS -q preemptable
+#PBS -l select=1:ncpus=64:ngpus=4
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=00:30:00
+# Not rerunnable: a preempted-and-rerun smoke would append two runs to one log.
+#PBS -r n
+#PBS -o /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/paper/
+#PBS -e /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/paper/
+
+set -uo pipefail
+
+BASE=/lus/eagle/projects/lighthouse-uchicago/members/mehta5
+REPO_ROOT="$BASE/decrypto"
+VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
+MODEL_KEY=qwen3_4b
+MODEL_PATH="$BASE/models/Qwen3-4B"
+PORT=8103
+HEALTH_TIMEOUT=900
+
+cd "$REPO_ROOT"
+mkdir -p "$REPO_ROOT/logs/paper" "$REPO_ROOT/logs/vllm"
+
+JOBTAG="${PBS_JOBID%%.*}"
+WRAP_LOG="$REPO_ROOT/logs/paper/polaris_envsmoke_${JOBTAG}.log"
+exec > >(stdbuf -oL -eL tee -a "$WRAP_LOG") 2>&1
+echo "=== node-env smoke $PBS_JOBID on $(hostname) at $(date) ==="
+
+NODE="$(head -n1 "$PBS_NODEFILE")"
+SERVERS_DIR="$REPO_ROOT/logs/servers/envsmoke_${JOBTAG}"
+SERVERS_FILE="$SERVERS_DIR/${JOBTAG}_${MODEL_KEY}.json"
+SERVER_LOG="$REPO_ROOT/logs/vllm/${MODEL_KEY}-${JOBTAG}.wrap.log"
+mkdir -p "$SERVERS_DIR"
+
+MPI_PID=""
+cleanup() {
+    echo "$(date): smoke cleanup (stopping the server launcher)"
+    [ -n "$MPI_PID" ] && kill "$MPI_PID" 2>/dev/null || true
+}
+trap cleanup EXIT TERM INT
+
+# ── 1. The server, through the production bootstrap ──
+echo ">>> starting $MODEL_KEY on $NODE via start_vllm_server_node.sh (log: $SERVER_LOG)"
+mpiexec -n 1 --ppn 1 --hosts "$NODE" \
+    env VENV_TARBALL="$VENV_TARBALL" \
+    bash "$REPO_ROOT/slurm/start_vllm_server_node.sh" \
+    "$MODEL_KEY" "$MODEL_PATH" 1 "$PORT" "$SERVERS_DIR" 0.90 8192 "" "" \
+    "$HEALTH_TIMEOUT" "$JOBTAG" &
+MPI_PID=$!
+
+_t0=$SECONDS
+until [ -f "$SERVERS_FILE" ]; do
+    if ! kill -0 "$MPI_PID" 2>/dev/null; then
+        echo "FATAL: server launcher exited before registering; tail of $SERVER_LOG:"
+        tail -n 40 "$SERVER_LOG" 2>/dev/null
+        echo "ERROR DECRYPTO_NODE_ENV_SMOKE_FAILED stage=server"
+        exit 44
+    fi
+    if [ $((SECONDS-_t0)) -gt $((HEALTH_TIMEOUT + 120)) ]; then
+        echo "ERROR DECRYPTO_NODE_ENV_SMOKE_FAILED stage=server (not registered in $((SECONDS-_t0))s)"
+        exit 45
+    fi
+    sleep 5
+done
+echo ">>> server registered after $((SECONDS-_t0))s: $(cat "$SERVERS_FILE")"
+
+# The server's own staged venv (same node) -- reused below for the record step.
+LOCAL_VENV="/local/scratch/${USER}_${JOBTAG}_${MODEL_KEY}/decrypto-serve"
+[ -d "$LOCAL_VENV" ] || LOCAL_VENV="/tmp/${USER}_${JOBTAG}_${MODEL_KEY}/decrypto-serve"
+
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY
+"$LOCAL_VENV/bin/python" - "$MODEL_PATH" "$PORT" <<'PYEOF'
+import json, sys, time, urllib.request
+model, port = sys.argv[1], sys.argv[2]
+body = json.dumps({
+    "model": model,
+    "messages": [{"role": "user", "content": "In one short sentence, what is the game Decrypto about? /no_think"}],
+    "max_tokens": 64, "temperature": 0.0,
+}).encode()
+op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions", body,
+                             {"Content-Type": "application/json"})
+t0 = time.time()
+out = json.load(op.open(req, timeout=300))
+print(f"completion in {time.time()-t0:.1f}s:", out["choices"][0]["message"]["content"])
+PYEOF
+COMPLETION_RC=$?
+echo ">>> completion rc=$COMPLETION_RC"
+
+echo ">>> server-log evidence ($SERVER_LOG):"
+grep -E "venv interpreter:|--- comm stack|\| NCCL |NCCL_\*/FI_\*|LD_LIBRARY_PATH=|nccl==|Found nccl|healthy after" "$SERVER_LOG" || true
+if grep -qE "\| NCCL [0-9]" "$SERVER_LOG"; then HEADER_RC=0; else HEADER_RC=1; fi
+if grep -qE "module load|conda activate|Lmod" "$SERVER_LOG"; then
+    echo "NOTE: server log mentions the conda module -- it should no longer be loaded"
+fi
+
+# ── 2. Record: the old conda lines, as-is, on a compute node ──
+echo ">>> record: the three conda lines as the job scripts used to run them"
+(
+    module use /soft/modulefiles
+    module load conda/2025-09-25
+    echo "module_load_rc=$?"
+    conda activate base
+    echo "conda_activate_rc=$?"
+    echo "python after activate: $(command -v python 2>&1) ($(python --version 2>&1))"
+    echo "LD_LIBRARY_PATH under the module: ${LD_LIBRARY_PATH:-<unset>}"
+    echo "the venv's torch under the module environment:"
+    OMP_NUM_THREADS=1 "$LOCAL_VENV/bin/python" - <<'PY'
+import torch
+v = torch.cuda.nccl.version()
+lib = next((l.split()[-1] for l in open("/proc/self/maps") if "libnccl" in l), "<libnccl not mapped>")
+print("  torch", torch.__version__, "| NCCL", ".".join(map(str, v)) if isinstance(v, tuple) else v, "|", lib)
+PY
+    echo "venv_torch_probe_rc=$?"
+) 2>&1 | sed 's/^/  [module] /'
+
+# ── Verdict ──
+echo "verdict: completion_rc=$COMPLETION_RC header_rc=$HEADER_RC"
+if [ $COMPLETION_RC -eq 0 ] && [ $HEADER_RC -eq 0 ]; then
+    echo "DECRYPTO_NODE_ENV_SMOKE_OK node=$(hostname) at $(date)"
+    exit 0
+fi
+echo "ERROR DECRYPTO_NODE_ENV_SMOKE_FAILED completion_rc=$COMPLETION_RC header_rc=$HEADER_RC"
+exit 1
