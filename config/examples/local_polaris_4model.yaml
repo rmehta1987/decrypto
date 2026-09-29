@@ -1,0 +1,54 @@
+defaults:
+  - override hydra/job_logging: disabled
+
+_target_: src.types.ExperimentConfig
+# Cross-play matrix: four models (3 self-hosted vLLM + Claude via the headless
+# CLI) available to all three roles, so 4x4x4 = 64 role combinations per
+# env_seed. Start at 1 seed x 1 episode (64 games) to prove the matrix
+# end-to-end; scale env_seed/num_episodes via CLI overrides for production.
+num_episodes: 1
+env_seed: [0]
+verbose: false
+baseline_data_dir: embedding_models/
+exp_name: polaris_4model
+confirm_include_api_models: true  # claude4.6_cli is an APIModel (Claude via CLI)
+
+# Full cross-play: no fixed roles, no encoder/decoder matching, no filtering.
+match_encoder_decoder: false
+fixed_encoder: ""
+fixed_decoder: ""
+fixed_interceptor: ""
+filter_model: ""
+no_error_history: true
+
+# The 3 LocalModel `urls` are filled at runtime by +get_models_from_slurm=true
+# (see slurm/fused_4model_polaris.pbs), which reads DECRYPTO_SERVERS_FILE.
+# claude4.6_cli needs no URL/key: use_cli routes it through the headless
+# `claude -p` CLI (its own OAuth session), which is why the fused job keeps
+# the ALCF egress proxy SET (with in-cluster hosts in no_proxy) instead of
+# unsetting it the way the 3-model-only job does — see
+# slurm/smoke_anthropic_polaris.pbs and src/agents/role_client.py.
+models:
+  - _target_: src.types.LocalModel
+    model_key: qwen2.5_72B
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen2.5-72B-Instruct
+    max_tokens: 1000
+    temperature: 0.0
+  - _target_: src.types.LocalModel
+    model_key: qwen3_8b
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen3-8B
+    max_tokens: 2500
+    max_reasoning_tokens: 2000
+    temperature: 0.0
+  - _target_: src.types.LocalModel
+    model_key: qwen3_4b
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen3-4B
+    max_tokens: 2500
+    max_reasoning_tokens: 2000
+    temperature: 0.0
+  - _target_: src.types.AnthropicModel
+    model_key: claude4.6_cli
+    model_id: claude-sonnet-4-6
+    use_cli: true
+    max_tokens: 750
+    temperature: 0.0

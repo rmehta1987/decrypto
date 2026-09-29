@@ -1,0 +1,251 @@
+#!/bin/bash
+# Polaris (PBS Pro) FUSED 4-model job — the same 3 self-hosted vLLM servers as
+# fused_3model_polaris.pbs, PLUS Claude (claude-sonnet-4-6) as a 4th roster
+# model called via the headless `claude -p` CLI (RoleClient.use_cli, see
+# src/agents/role_client.py). Adapted from fused_3model_polaris.pbs; see that
+# file for the two-job-skew rationale for fusing servers + experiment into one
+# job.
+#
+# The ONE change from fused_3model_polaris.pbs: the experiment node (node 0)
+# KEEPS the ALCF egress proxy SET (instead of unsetting it) so `claude -p`'s
+# external hop to api.anthropic.com works, while listing in-cluster hosts
+# (.hsn.cm.polaris.alcf.anl.gov, the 10.201.0.0/16 range) in no_proxy so the
+# vLLM HTTP traffic still bypasses the proxy. This exact combination was
+# validated end-to-end by slurm/smoke_anthropic_polaris.pbs (job 7599868,
+# `[cli] OK` through the proxy from a compute node) -- what's new here is
+# running it on the SAME node as (proxy-bypassed) vLLM traffic simultaneously.
+#
+# Layout: node 1 -> qwen2.5_72B (TP=4), node 2 -> qwen3_8b, node 3 -> qwen3_4b,
+# node 0 (this script's node) -> experiment, including the claude4.6_cli calls
+# (CPU/HTTP+CLI only, GPUs idle).
+#
+# Submit (defaults below are smoke-sized; override for production):
+#   qsub -q capacity -l walltime=02:00:00 slurm/fused_4model_polaris.pbs
+#   qsub -q capacity -l walltime=17:00:00 \
+#        -v CONFIG_NAME=local_polaris_4model,EXP_NAME=polaris_4model,SEEDS="0 1 2 3 4" \
+#        slurm/fused_4model_polaris.pbs
+#
+# (PBS reads only lines starting with "#PBS"; annotations go on the line ABOVE.)
+#PBS -N decrypto-4model-fused
+#PBS -A lighthouse-uchicago
+#PBS -q preemptable
+#PBS -r y
+#PBS -l select=4:ncpus=64:ngpus=4
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=02:00:00
+#PBS -o /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/paper/
+#PBS -e /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/paper/
+
+set -uo pipefail
+
+BASE=/lus/eagle/projects/lighthouse-uchicago/members/mehta5
+REPO_ROOT="$BASE/decrypto"
+VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
+CONFIG_NAME="${CONFIG_NAME:-local_polaris_4model}"
+EXP_NAME="${EXP_NAME:-polaris_4model}"
+SEEDS="${SEEDS:-}"
+NUM_EPISODES="${NUM_EPISODES:-}"
+# Server bring-up budget (cold 72B load is ~240 s + queueless here, but Lustre
+# varies); the experiment-side ready poll gets the same budget.
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-2400}"
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-2700}"
+
+cd "$REPO_ROOT"
+mkdir -p "$REPO_ROOT/logs/paper" "$REPO_ROOT/logs/vllm"
+
+JOBTAG="${PBS_JOBID%%.*}"
+WRAP_LOG="$REPO_ROOT/logs/paper/polaris_fused4_${JOBTAG}.log"
+exec > >(stdbuf -oL -eL tee -a "$WRAP_LOG") 2>&1
+echo "=== fused 4-model job $PBS_JOBID on $(hostname) at $(date) ==="
+
+# ── The job's nodes. Node 0 (first in PBS_NODEFILE, where this script runs)
+#    hosts the experiment; nodes 1..3 host one vLLM server each (Claude runs
+#    as a CLI subprocess on node 0, no server/node of its own). ──
+mapfile -t NODES < <(sort -u "$PBS_NODEFILE")
+echo "nodes: ${NODES[*]}"
+if [ "${#NODES[@]}" -lt 4 ]; then echo "FATAL: need 4 nodes, got ${#NODES[@]}"; exit 2; fi
+
+# Per-model serving plan — keep in sync with launch_servers_polaris.sh and the
+# verified configs (72B: probe 7197375; Qwen3: probe 7197265).
+model_keys=(qwen2.5_72B qwen3_8b qwen3_4b)
+model_paths=("$BASE/models/Qwen2.5-72B-Instruct" "$BASE/models/Qwen3-8B" "$BASE/models/Qwen3-4B")
+tps=(4 1 1)
+mem_utils=(0.97 0.90 0.90)
+max_lens=(8192 8192 8192)
+mnbts=(2048 "" "")
+mnseqs=(64 "" "")
+ports=(8101 8102 8103)
+
+# Every model must be staged before any node is spent loading one.
+source "$REPO_ROOT/slurm/polaris_preflight.sh"
+for p in "${model_paths[@]}"; do decrypto_model_path_check "$p" || exit 2; done
+
+SERVERS_DIR="$REPO_ROOT/logs/servers/fused4_${JOBTAG}"
+mkdir -p "$SERVERS_DIR"
+export DECRYPTO_SERVERS_FILE="$SERVERS_DIR"
+echo "SERVERS_DIR=$SERVERS_DIR"
+
+MPI_PIDS=()
+cleanup() {
+    echo "$(date): fused-job cleanup (stopping server launchers)"
+    for p in "${MPI_PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
+}
+trap cleanup EXIT TERM INT
+
+# ── Launch one vLLM server per node (mpiexec runs the bootstrap on the target
+#    node; it stages its own venv and logs to logs/vllm/<key>-<jobtag>.wrap.log) ──
+for i in 0 1 2; do
+    node="${NODES[$((i+1))]}"
+    echo ">>> starting ${model_keys[$i]} on $node (tp=${tps[$i]} port=${ports[$i]})"
+    mpiexec -n 1 --ppn 1 --hosts "$node" \
+        env VENV_TARBALL="$VENV_TARBALL" \
+        bash "$REPO_ROOT/slurm/start_vllm_server_node.sh" \
+        "${model_keys[$i]}" "${model_paths[$i]}" "${tps[$i]}" "${ports[$i]}" \
+        "$SERVERS_DIR" "${mem_utils[$i]}" "${max_lens[$i]}" "${mnbts[$i]}" \
+        "${mnseqs[$i]}" "$HEALTH_TIMEOUT" "$JOBTAG" &
+    MPI_PIDS+=($!)
+done
+
+# ── Meanwhile prepare the experiment env on THIS node (CPU/HTTP + Claude CLI).
+#    No conda module: the venv is hand-activated and its interpreter is checked
+#    directly (see slurm/start_vllm_server_node.sh). ──
+unset TMPDIR
+NODE_SCRATCH=/local/scratch
+[ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp
+export TMPDIR="$NODE_SCRATCH/${USER}_${JOBTAG}"
+mkdir -p "$TMPDIR"
+if [ ! -f "$VENV_TARBALL" ]; then echo "FATAL: venv tarball not found"; exit 2; fi
+LOCAL_VENV="$TMPDIR/decrypto-serve"
+mkdir -p "$LOCAL_VENV"
+tar xf "$VENV_TARBALL" -C "$LOCAL_VENV"
+decrypto_venv_preflight "$LOCAL_VENV" || exit 3
+export VIRTUAL_ENV="$LOCAL_VENV"
+export PATH="$LOCAL_VENV/bin:$HOME/.local/bin:$PATH"
+hash -r
+export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+echo "claude binary    : $(command -v claude || echo NOT FOUND) ($(claude --version 2>&1))"
+# The runner spawns one process per game (ProcessPoolExecutor with
+# max_workers=total games); with the default OMP thread count (= 64 hw
+# threads) that would blow the per-job cgroup pids.max=4096. The experiment is
+# HTTP/CLI-only, so 1 BLAS/OMP thread per game process is right.
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+# Cap concurrent games so the slow 72B vLLM server (KV cache ~18,800 tokens ~=
+# 2.3x concurrency at 8192) is not flooded (see fused_3model_polaris.pbs /
+# job 7199012's 245/405 overload) AND so we don't fire off more simultaneous
+# `claude -p` subprocesses than is sane for a first smoke. Lower than the
+# 3-model job's 24 because up to 1/4 of role-slots per turn now go to Claude,
+# whose per-call latency (~4-20s CLI round trip) is far higher than the vLLM
+# servers' (~1-2s), so wall-clock is Claude-call-bound, not server-bound, at
+# this concurrency; raise once the smoke's real bottleneck is measured.
+export DECRYPTO_MAX_WORKERS="${DECRYPTO_MAX_WORKERS:-12}"
+# KEEP the proxy set (unlike fused_3model_polaris.pbs, which unsets it): Claude
+# calls need the external hop; no_proxy exempts in-cluster vLLM traffic so it
+# still goes direct. Validated together end-to-end by smoke_anthropic_polaris.pbs.
+export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
+export HTTPS_PROXY="$HTTP_PROXY"
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTP_PROXY"
+export no_proxy="localhost,127.0.0.1,::1,10.201.0.0/16,.hsn.cm.polaris.alcf.anl.gov,.alcf.anl.gov"
+export NO_PROXY="$no_proxy"
+echo "experiment python: $(command -v python)  proxy=$https_proxy  no_proxy=$no_proxy"
+
+# httpx (under the openai client, used by ping_servers AND the runner's
+# LocalModel calls) ignores CIDR entries: "10.201.0.0/16" only matches the
+# literal host 10.201.0.0, so requests to the servers' registered 10.201.x.x
+# IPs went to the proxy (job 7599882: 0/3 ready for 2700 s). Pre-resolving the
+# node names is not enough either: each node's .hsn name resolves to TWO IPs
+# (dual HSN NICs), in an order that differs between nodes, so node 0 listed
+# the other NIC's IP than the one each server registered (job 7668624, same
+# 0/3). So exempt exactly the hosts the servers REGISTERED, as they appear,
+# and fail at once if httpx would still proxy any of them.
+sync_no_proxy() {
+    local out
+    out="$(python - "$SERVERS_DIR" <<'PYEOF'
+import glob, json, os, sys
+from urllib.parse import urlparse
+import httpx
+np = os.environ.get("no_proxy", "")
+have = set(np.split(","))
+urls = []
+for f in sorted(glob.glob(os.path.join(sys.argv[1], "*.json"))):
+    try:
+        urls += json.load(open(f)).get("urls", [])
+    except Exception:
+        pass  # registration being replaced; picked up next poll
+for u in urls:
+    h = urlparse(u).hostname
+    if h and h not in have:
+        np += "," + h
+        have.add(h)
+        print(f"no_proxy += {h} (registered server)", file=sys.stderr)
+os.environ["no_proxy"] = os.environ["NO_PROXY"] = np
+c = httpx.Client()
+proxied = [u for u in urls if c._transport_for_url(httpx.URL(u)) is not c._transport]
+if proxied:
+    print(f"FATAL: httpx would still proxy {proxied}", file=sys.stderr)
+print(np)
+sys.exit(1 if proxied else 0)
+PYEOF
+)" || return 1
+    no_proxy="$out"
+    export no_proxy NO_PROXY="$out"
+}
+
+# ── Wait for all 3 vLLM servers to answer over HTTP (Claude needs no wait --
+#    the CLI is either callable or it isn't, checked implicitly on first use) ──
+EXPECTED_MODELS=3
+echo "Waiting for $EXPECTED_MODELS vLLM servers (timeout ${WAIT_TIMEOUT}s)..."
+_t0=$SECONDS
+while true; do
+    sync_no_proxy || { echo "FATAL: vLLM traffic would go through the proxy (see above)"; exit 47; }
+    READY_COUNT=$(python -m slurm.ping_servers 2>/dev/null | grep -c "Reply time" || true)
+    if [ "$READY_COUNT" -ge "$EXPECTED_MODELS" ]; then
+        echo "All $EXPECTED_MODELS vLLM servers ready after $((SECONDS-_t0))s (no_proxy=$no_proxy)."
+        break
+    fi
+    # A dead launcher means its server can never come up — fail fast.
+    for p in "${MPI_PIDS[@]}"; do
+        if ! kill -0 "$p" 2>/dev/null; then
+            echo "FATAL: a server launcher exited early; servers dir:"; ls -la "$SERVERS_DIR"
+            exit 44
+        fi
+    done
+    if [ $((SECONDS-_t0)) -gt "$WAIT_TIMEOUT" ]; then
+        echo "FATAL: only $READY_COUNT/$EXPECTED_MODELS vLLM servers ready after ${WAIT_TIMEOUT}s"
+        ls -la "$SERVERS_DIR" || true
+        echo "last ping_servers output (the error the poll hides):"
+        python -m slurm.ping_servers 2>&1 | tail -n 20
+        exit 46
+    fi
+    echo "  $READY_COUNT / $EXPECTED_MODELS vLLM servers ready — sleeping 30s..."
+    sleep 30
+done
+
+# ── Run the experiment ──
+SCALE_OVERRIDES=()
+[ -n "$SEEDS" ] && SCALE_OVERRIDES+=("env_seed=[${SEEDS// /,}]")
+[ -n "$NUM_EPISODES" ] && SCALE_OVERRIDES+=("num_episodes=$NUM_EPISODES")
+# Extra Hydra overrides, space-separated (qsub -v splits on commas), e.g. the
+# 1-hour smoke: HYDRA_OVERRIDES=match_encoder_decoder=true (16 games, not 64).
+if [ -n "${HYDRA_OVERRIDES:-}" ]; then
+    read -ra _extra <<< "$HYDRA_OVERRIDES"
+    SCALE_OVERRIDES+=("${_extra[@]}")
+fi
+echo "=== running run.py (config=$CONFIG_NAME exp_name=$EXP_NAME overrides='${SCALE_OVERRIDES[*]:-}') ==="
+python run.py \
+  --config-path=config/examples \
+  --config-name="$CONFIG_NAME" \
+  +get_models_from_slurm=true \
+  exp_name="$EXP_NAME" \
+  "${SCALE_OVERRIDES[@]}"
+RUN_RC=$?
+echo ">>> run.py exit rc=$RUN_RC"
+
+if [ -f "$REPO_ROOT/results/$EXP_NAME/experiment_summary.csv" ]; then
+    echo ">>> RESULTS: results/$EXP_NAME/experiment_summary.csv ($(wc -l < "$REPO_ROOT/results/$EXP_NAME/experiment_summary.csv") lines)"
+    [ $RUN_RC -eq 0 ] && echo "=== FUSED RUN COMPLETE at $(date) ==="
+else
+    echo ">>> WARNING: results/$EXP_NAME/experiment_summary.csv not written"
+fi
+exit $RUN_RC
