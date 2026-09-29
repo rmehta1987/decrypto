@@ -1,0 +1,57 @@
+defaults:
+  - override hydra/job_logging: disabled
+
+_target_: src.types.ExperimentConfig
+# Paper figure-3 COMPETITIVE setup (config/paper/figure_3_competitive.yaml) on
+# the Polaris 4-model roster: each model plays as a team (encoder == decoder)
+# against every model as interceptor -> 4 x 4 = 16 combinations per env_seed.
+# Kept from the paper: env_seed [0,1,2] x num_episodes 32 (episode seeds are
+# ep + env_seed * 32, so the game instances are the paper's), model_seed 0
+# applied to every model, temperature 0.6, and error messages kept in context
+# (no_error_history false). Deliberately different: our models and token
+# budgets, and no GloVe/Word2Vec baselines (embedding data not staged).
+# slurm/fused_4model_polaris.pbs runs one env_seed per job (SEEDS=0|1|2).
+num_episodes: 32
+env_seed: [0, 1, 2]
+model_seed: 0
+override_model_seed: true
+verbose: false
+baseline_data_dir: embedding_models/
+exp_name: polaris_4model_competitive
+confirm_include_api_models: true  # claude4.6_cli is an APIModel (Claude via CLI)
+
+match_encoder_decoder: true  # only encoder == decoder (teams), as in the paper
+fixed_encoder: ""
+fixed_decoder: ""
+fixed_interceptor: ""
+filter_model: ""
+no_error_history: false  # paper default
+
+# LocalModel urls are filled at runtime by +get_models_from_slurm=true.
+models:
+  - _target_: src.types.LocalModel
+    model_key: qwen2.5_72B
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen2.5-72B-Instruct
+    max_tokens: 1000
+    temperature: 0.6
+  - _target_: src.types.LocalModel
+    model_key: qwen3_8b
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen3-8B
+    max_tokens: 2500
+    max_reasoning_tokens: 2000
+    temperature: 0.6
+  - _target_: src.types.LocalModel
+    model_key: qwen3_4b
+    model_id: /lus/eagle/projects/lighthouse-uchicago/members/mehta5/models/Qwen3-4B
+    max_tokens: 2500
+    max_reasoning_tokens: 2000
+    temperature: 0.6
+  # use_cli passes only the model and the system prompt to `claude -p`, so
+  # temperature and max_tokens below are NOT applied: Claude samples at the
+  # CLI default. They are listed to mirror the paper's settings.
+  - _target_: src.types.AnthropicModel
+    model_key: claude4.6_cli
+    model_id: claude-sonnet-4-6
+    use_cli: true
+    max_tokens: 750
+    temperature: 0.6
