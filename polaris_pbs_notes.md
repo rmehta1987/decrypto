@@ -389,7 +389,7 @@ never a cluster-wide `find`).
 | `logs/paper/polaris_fused4_7599882.log`, `logs/vllm/{qwen2.5_72B,qwen3_8b,qwen3_4b}-7599882.wrap.log` | 7599882 | capacity | 4-model smoke (3 vLLM + `claude -p`), `slurm/fused_4model_polaris.pbs` (untracked) | Unsuccessful | 2026-09-09. All 3 servers healthy and registered (72B after 524 s at `10.201.4.66:8101`; 4B 139 s; 8B), but the experiment node's ready poll saw **0/3 for 2700 s** → exit 46; `run.py` never started. Root cause (diagnosed 2026-09-28, reproduced on the login node): node 0 keeps the ALCF proxy set for Claude and relied on `10.201.0.0/16` in `no_proxy`, but **httpx 0.28.1 (under the `openai` client) ignores CIDR entries**, so every request to a registered `10.201.x.x` IP went to the proxy. Fixed by listing each node's HSN IP explicitly + a fail-fast bypass check (exit 47) |
 | `logs/paper/polaris_fused4_7666432.log`, `logs/vllm/{qwen2.5_72B,qwen3_8b,qwen3_4b}-7666432.wrap.log`, `results/polaris_4model_smoke/` | 7666432 | capacity | 4-model smoke, 1 seed = 64 games, `DECRYPTO_MAX_WORKERS=12` | Aborted (never ran) | Rerun of 7599882 with the proxy fix (script still untracked). `Submit_arguments = -q capacity -l walltime=03:00:00 -v EXP_NAME=polaris_4model_smoke slurm/fused_4model_polaris.pbs`. Submitted 2026-09-28; `qdel`'d while still queued on 2026-09-29, because the operator said not to use `capacity` yet. No logs |
 | `logs/paper/polaris_fused4_7667369.log`, `logs/vllm/{qwen2.5_72B,qwen3_8b,qwen3_4b}-7667369.wrap.log`, `results/polaris_4model_smoke16/` | 7667369 | preemptable | 4-model smoke, `match_encoder_decoder=true` → 4 teams × 4 interceptors = 16 games, `DECRYPTO_MAX_WORKERS=16` | Pending | Rerun of 7599882 with the proxy fix; every model still plays every role. `debug-scaling` was tried first but rejected (`max_queued=[u:PBS_GENERIC=1]` counts running jobs, and MARSHAL's 7667241 held the slot); `capacity` is off-limits for now. `Submit_arguments = -q preemptable -l walltime=02:00:00 -v EXP_NAME=polaris_4model_smoke16,HYDRA_OVERRIDES=match_encoder_decoder=true,DECRYPTO_MAX_WORKERS=16 slurm/fused_4model_polaris.pbs` (script untracked; `-r y`). Submitted 2026-09-29 05:44Z. PASS = `run.py` rc 0 + 16-row `experiment_summary.csv` |
-| `logs/paper/polaris_envsmoke_7666323.log`, `logs/vllm/qwen3_4b-7666323.wrap.log`, `logs/paper/7666323.*.OU/.ER` | 7666323 | preemptable | Qwen3-4B / TP1 via `start_vllm_server_node.sh` | Pending | Node-env smoke for the 2026-09-28 changes (`slurm/smoke_node_env_polaris.pbs`). `Submit_arguments = slurm/smoke_node_env_polaris.pbs` (queue/walltime from the `#PBS` header: preemptable, 00:30:00, `-r n`). Submitted 2026-09-28 20:20Z; PASS token `DECRYPTO_NODE_ENV_SMOKE_OK` |
+| `logs/paper/polaris_envsmoke_7666323.log`, `logs/vllm/qwen3_4b-7666323.wrap.log`, `logs/paper/7666323.*.OU/.ER` | 7666323 | preemptable → **debug** | Qwen3-4B / TP1 via `start_vllm_server_node.sh` | Pending | Node-env smoke for the 2026-09-28 changes (`slurm/smoke_node_env_polaris.pbs`). `Submit_arguments = slurm/smoke_node_env_polaris.pbs` (queue/walltime from the `#PBS` header: preemptable, 00:30:00, `-r n`). Submitted 2026-09-28 20:20Z. It sat ~19 h on preemptable, then `qmove debug 7666323` at the operator's request on 2026-09-29 ~15:40Z; it started immediately. **`DECRYPTO_NODE_ENV_SMOKE_OK`**, Exit 0, 1 min 50 s on `x3109c0s7b0n0`. MEASURED: venv extracted in 11 s, and the interpreter pre-flight resolved to `…/mconda3/bin/python3.12`. The comm-stack header printed `torch 2.6.0+cu124 \| NCCL 2.21.5 \| …/decrypto-serve/…/nvidia/nccl/lib/libnccl.so.2`, with no `NCCL_*`/`FI_*` set and no `/soft/libraries/nccl` on `LD_LIBRARY_PATH`. 4B healthy after 91 s (KV 189,840 tokens); a real chat completion took 0.7 s. The old conda lines on a compute node: `module_load_rc=0`, `conda_activate_rc=0`, so ALCF's fix holds there too. Under that module environment (nccl 2.28.3 on `LD_LIBRARY_PATH`) the venv's torch **still loaded the wheel's 2.21.5**, which confirms the RPATH prediction |
 
 ---
 
@@ -760,8 +760,8 @@ never a cluster-wide `find`).
   after 139 s; vLLM reported `nccl==2.21.5`), so the module was never needed at
   run time. ALCF rewrote the modulefiles on 2026-09-16 (`/soft/modulefiles/conda/*.lua`
   mtimes). On the login node on 2026-09-28 the three lines succeed again
-  (`module load` rc 0, `conda activate` rc 0, python 3.12.11), but compute-node
-  behaviour is UNVERIFIED until the smoke below. The fixed `2025-09-25.lua` now
+  (`module load` rc 0, `conda activate` rc 0, python 3.12.11), and on a compute
+  node too (MEASURED, job 7666323: both rc 0). The fixed `2025-09-25.lua` now
   also prepends `/soft/libraries/nccl/nccl_2.28.3-1+cuda12.9_x86_64/lib` to
   `LD_LIBRARY_PATH` (and sets `CC=/usr/bin/gcc-14`, `CUDA_HOME=cuda-12.9.1`,
   `http(s)_proxy`). **Decision (operator, 2026-09-28):** drop the module from
@@ -774,6 +774,9 @@ never a cluster-wide `find`).
   each script now runs `decrypto_venv_preflight` (`slurm/polaris_preflight.sh`)
   after extracting the tarball, and exits 3 if the interpreter does not resolve.
   Without that check, a moved conda tree would break every tarball venv silently.
-  (NCCL note, PREDICTED: `libtorch_cuda.so` carries DT_**RPATH**
+  (NCCL note: `libtorch_cuda.so` carries DT_**RPATH**
   `$ORIGIN/../../nvidia/nccl/lib`, which is searched before `LD_LIBRARY_PATH`,
-  so even with the module loaded torch should keep the wheel's 2.21.5.)
+  so even with the module loaded torch keeps the wheel's 2.21.5. That was
+  predicted and then MEASURED in job 7666323, which ran with ALCF's 2.28.3 on
+  `LD_LIBRARY_PATH`. So the module was never a correctness risk for NCCL. It
+  stays dropped because it isn't needed and it changes CC/CUDA_HOME/proxy.)
