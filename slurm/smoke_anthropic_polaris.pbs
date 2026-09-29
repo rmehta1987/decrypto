@@ -1,0 +1,93 @@
+#!/bin/bash
+# Polaris (PBS Pro) smoke for OPTION B: call the Anthropic (Claude) API from a
+# COMPUTE node, through the ALCF egress proxy. This is the INVERSE of
+# smoke_polaris.pbs: that job UNSETS the proxy (its vLLM traffic is in-cluster and
+# must not route through the air-gapped proxy); this job KEEPS the proxy set so the
+# *external* hop to api.anthropic.com egresses, while still listing in-cluster hosts
+# in no_proxy. That combination (proxy SET + comprehensive no_proxy) is exactly what
+# a future fused job -- local vLLM Qwen AND Claude-over-API in the same run -- needs
+# so both the in-cluster and the external hop work at once.
+#
+# Also validates the headless `claude -p` CLI round-trip (RoleClient.use_cli's
+# actual production path, see src/agents/role_client.py) through the same proxy --
+# that check uses the CLI's own OAuth session, not ANTHROPIC_API_KEY, so it is the
+# load-bearing one for the eventual 4-model (3 vLLM + Claude-via-CLI) fused job.
+#
+# No GPU is needed: this only exercises the network + API. (Polaris allocates the
+# whole node regardless.) The decisive checks are fast; the slow part is staging the
+# serving venv (~12s) so the test runs in the EXACT env a real fused job would use.
+#
+# Submit:  qsub slurm/smoke_anthropic_polaris.pbs
+#   key  : put ANTHROPIC_API_KEY in <repo>/.env (read via python-dotenv), or
+#          qsub -v ANTHROPIC_API_KEY=sk-ant-... slurm/smoke_anthropic_polaris.pbs
+#          (the .env path is preferred -- a key on the qsub line shows in `qstat -f`)
+#   model: qsub -v MODEL=claude-sonnet-4-6 slurm/smoke_anthropic_polaris.pbs
+#   venv : qsub -v VENV_TARBALL=/path/to.tar slurm/smoke_anthropic_polaris.pbs
+#
+# (PBS reads only lines starting with "#PBS"; annotations go on the line ABOVE.)
+#PBS -N decrypto-anthropic-smoke
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:ncpus=32
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=00:15:00
+#PBS -o /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/paper/
+#PBS -e /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/paper/
+
+set -uo pipefail
+
+BASE=/lus/eagle/projects/lighthouse-uchicago/members/mehta5
+REPO_ROOT="$BASE/decrypto"
+VENV_TARBALL="${VENV_TARBALL:-$BASE/decrypto-serve-venv.tar}"
+MODEL="${MODEL:-claude-sonnet-4-6}"
+
+cd "$REPO_ROOT"
+mkdir -p "$REPO_ROOT/logs/paper"
+JOBTAG="${PBS_JOBID%%.*}"
+exec > >(stdbuf -oL -eL tee -a "$REPO_ROOT/logs/paper/anthropic_smoke_${JOBTAG}.log") 2>&1
+echo "=== anthropic smoke $PBS_JOBID on $(hostname) at $(date) ==="
+
+# ── Modules + node-local scratch ──
+module use /soft/modulefiles
+module load conda/2025-09-25
+conda activate base
+unset TMPDIR
+NODE_SCRATCH=/local/scratch
+[ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp
+export TMPDIR="$NODE_SCRATCH/${USER}_${JOBTAG}"
+mkdir -p "$TMPDIR"
+
+# ── Stage venv -> node-local SSD, activate manually (relocated venv) ──
+if [ ! -f "$VENV_TARBALL" ]; then echo "FATAL: venv tarball not found: $VENV_TARBALL"; exit 2; fi
+LOCAL_VENV="$TMPDIR/decrypto-serve"
+mkdir -p "$LOCAL_VENV"
+_t0=$SECONDS
+tar xf "$VENV_TARBALL" -C "$LOCAL_VENV"
+echo "venv extracted in $((SECONDS-_t0))s"
+export VIRTUAL_ENV="$LOCAL_VENV"
+export PATH="$LOCAL_VENV/bin:$HOME/.local/bin:$PATH"
+hash -r
+export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
+echo "claude binary    : $(command -v claude || echo NOT FOUND) ($(claude --version 2>&1))"
+
+# ── KEEP the ALCF proxy for the external hop; bypass in-cluster hosts. Compute
+#    nodes already export http_proxy, but we set it explicitly so behavior is
+#    independent of node defaults and obvious in the log. The no_proxy list is the
+#    same in-cluster set smoke_polaris.pbs uses, so localhost / HSN / *.alcf.anl.gov
+#    (incl. the Option-A inference endpoint) stay direct while api.anthropic.com
+#    egresses through the proxy. ──
+export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
+export HTTPS_PROXY="$HTTP_PROXY"
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTP_PROXY"
+export no_proxy="localhost,127.0.0.1,::1,10.201.0.0/16,.hsn.cm.polaris.alcf.anl.gov,.alcf.anl.gov"
+export NO_PROXY="$no_proxy"
+echo "python: $(command -v python) ($(python --version 2>&1))  proxy=$https_proxy"
+
+# Script auto-detects the proxy from https_proxy above (the env-based path a real
+# fused job would use). Pass --alcf-proxy instead to hard-pin it.
+python slurm/smoke_anthropic_proxy.py --model "$MODEL"
+RC=$?
+echo ">>> smoke rc=$RC"
+[ $RC -eq 0 ] && echo "=== ANTHROPIC SMOKE GREEN at $(date) ==="
+exit $RC

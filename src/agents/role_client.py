@@ -4,8 +4,10 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import os
 import pickle
+import subprocess
 from random import sample
 
 import anthropic
@@ -69,7 +71,9 @@ def initialize_client(model):
                 num_retries=model.num_retries,
             )
         elif isinstance(model, AnthropicModel):
-            client = anthropic.Client(api_key=api_key)
+            # CLI mode shells out to `claude -p` per call (see
+            # RoleClient._claude_cli_completion) and needs no SDK client/key.
+            client = None if model.use_cli else anthropic.Client(api_key=api_key)
         elif isinstance(model, OpenAIModel):
             # OpenAI models
             if model.use_azure:
@@ -123,6 +127,7 @@ class RoleClient:
             else False
         )
         self.use_litellm = model.use_litellm if hasattr(model, "use_litellm") else False
+        self.use_cli = model.use_cli if hasattr(model, "use_cli") else False
 
         self.system_prompt = get_system_prompt(role, mode)
         if self.pass_system_as_user or isinstance(model, AnthropicModel):
@@ -228,7 +233,9 @@ class RoleClient:
         
         for attempt in range(max_retries):
             try:
-                if self.model_key.startswith("claude"):
+                if self.model_key.startswith("claude") and self.use_cli:
+                    content = self._claude_cli_completion(messages)
+                elif self.model_key.startswith("claude"):
                     # --- debug ---
                     print("DEBUG: Starting Claude chat completion")
                     # -----------------
@@ -400,6 +407,40 @@ class RoleClient:
         #     import traceback
         #     traceback.print_exc()
         #     return None
+
+    def _claude_cli_completion(self, messages):
+        """Call the headless Claude Code CLI (`claude -p`) as a stateless
+        chat-completion: the full message history is flattened into one
+        transcript and piped over stdin, mirroring how the Anthropic SDK path
+        above resends `messages` in full on every call. `--system-prompt`
+        replaces the CLI's own default system prompt outright (no CLAUDE.md/
+        memory/tool-schema overhead), and `--tools ""` keeps this a plain text
+        completion rather than an agentic loop.
+        """
+        if len(messages) == 1:
+            transcript = messages[0]["content"]
+        else:
+            transcript = "\n\n".join(
+                f"[{m['role'].upper()}]\n{m['content']}" for m in messages
+            )
+
+        cmd = [
+            "claude", "-p",
+            "--model", self.model_id,
+            "--system-prompt", self.system_prompt,
+            "--output-format", "json",
+            "--tools", "",
+            "--no-session-persistence",
+        ]
+        proc = subprocess.run(
+            cmd, input=transcript, capture_output=True, text=True, timeout=180
+        )
+        if proc.returncode != 0 and not proc.stdout:
+            raise RuntimeError(f"claude -p failed (rc={proc.returncode}): {proc.stderr}")
+        data = json.loads(proc.stdout)
+        if data.get("is_error"):
+            raise RuntimeError(f"claude -p error: {data.get('result')}")
+        return data["result"]
 
     def reset_used_hints(self):
         if self.is_baseline and self.role == "encoder":

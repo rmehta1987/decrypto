@@ -131,6 +131,16 @@ class AnthropicModel(APIModel):
             "help": "Maximum number of reasoning tokens for Extended Thinking. 0 disables ET. Only used by 3.7"
         },
     )
+    use_cli: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Call the headless Claude Code CLI (`claude -p`) instead of the "
+                "Anthropic API. Uses the CLI's own OAuth session, so no "
+                "`api_key_name`/ANTHROPIC_API_KEY is needed."
+            )
+        },
+    )
 
 
 @dataclass

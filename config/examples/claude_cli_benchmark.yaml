@@ -1,0 +1,17 @@
+defaults:
+  - override hydra/job_logging: disabled
+
+_target_: src.types.ExperimentConfig
+num_episodes: 3
+env_seed: [0, 1, 2]
+verbose: false
+baseline_data_dir: ../embedding_models/
+exp_name: claude_cli_benchmark
+confirm_include_api_models: true  # Warning: will incur Claude usage costs
+models:
+  - _target_: src.types.AnthropicModel
+    model_key: claude4.6_cli
+    model_id: claude-sonnet-4-6
+    use_cli: true   # calls the headless `claude -p` CLI, no ANTHROPIC_API_KEY needed
+    temperature: 0.0
+    max_tokens: 750
