@@ -1,0 +1,56 @@
+#!/bin/bash
+# Polaris (PBS Pro) 1-node CPU job that runs the 4-model competitive analysis
+# (analysis/plot_polaris_4model_competitive.py): figures into
+# results/polaris_4model_competitive/figures/ and the full text report (tables,
+# ANOVA, tests, log audit) into logs/analysis/. Analysis scripts are not run on
+# the login node; this job is the vehicle.
+#
+# Submit:  qsub slurm/analysis_polaris_4model.pbs
+# PASS token: DECRYPTO_ANALYSIS_OK
+#
+# (PBS reads only lines starting with "#PBS"; annotations go on the line ABOVE.)
+#PBS -N decrypto-analysis
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:ncpus=64:ngpus=4
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=00:20:00
+#PBS -r n
+#PBS -o /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/analysis/
+#PBS -e /lus/eagle/projects/lighthouse-uchicago/members/mehta5/decrypto/logs/analysis/
+
+set -uo pipefail
+
+BASE=/lus/eagle/projects/lighthouse-uchicago/members/mehta5
+REPO_ROOT="$BASE/decrypto"
+
+cd "$REPO_ROOT"
+mkdir -p "$REPO_ROOT/logs/analysis"
+JOBTAG="${PBS_JOBID%%.*}"
+REPORT="$REPO_ROOT/logs/analysis/polaris_4model_competitive_${JOBTAG}.txt"
+exec > >(stdbuf -oL -eL tee -a "$REPORT") 2>&1
+echo "=== analysis $PBS_JOBID on $(hostname) at $(date) ==="
+
+# The eagle venv itself, NOT the serving tarball: matplotlib was installed into
+# the eagle venv after the tarball was packed (job 7731541 failed on
+# `No module named 'matplotlib'` from the tarball copy). Only numpy/scipy/
+# matplotlib are imported, so the Lustre import cost is small. No conda module
+# (see slurm/start_vllm_server_node.sh).
+source "$REPO_ROOT/slurm/polaris_preflight.sh"
+VENV="${ANALYSIS_VENV:-$BASE/conda-envs/decrypto-serve}"
+decrypto_venv_preflight "$VENV" || exit 3
+unset TMPDIR
+NODE_SCRATCH=/local/scratch
+[ -d "$NODE_SCRATCH" ] || NODE_SCRATCH=/tmp
+export TMPDIR="$NODE_SCRATCH/${USER}_${JOBTAG}"
+mkdir -p "$TMPDIR"
+export VIRTUAL_ENV="$VENV" PATH="$VENV/bin:$PATH" PYTHONNOUSERSITE=1 MPLBACKEND=Agg
+export MPLCONFIGDIR="$TMPDIR/mpl"
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+hash -r
+
+python -u analysis/plot_polaris_4model_competitive.py
+RC=$?
+echo ">>> analysis rc=$RC"
+[ $RC -eq 0 ] && echo "DECRYPTO_ANALYSIS_OK report=$REPORT"
+exit $RC

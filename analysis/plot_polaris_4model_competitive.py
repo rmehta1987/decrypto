@@ -32,7 +32,9 @@ import textwrap
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
+from scipy import stats
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CSVS = [os.path.join(REPO, "results", f"polaris_4model_competitive_s{s}", "experiment_summary.csv") for s in (0, 1, 2)]
@@ -321,10 +323,240 @@ def print_tables(rows):
     pt = [PAPER_TURNS[i][j][0] for i in idx for j in idx]
     print(f"\npaper LLM block: interception {st.mean(pi):.3f}, turns {st.mean(pt):.2f}; "
           f"ours: interception {st.mean(intercept_share(r) for r in rows):.3f}, turns {st.mean(turns(r) for r in rows):.2f}")
+    print("\n## By opponent (pooled over teams and seeds; Wilson 95%) and turns of games against it (mean ± propagated SE)")
+    for o in MODELS:
+        g = [r for r in rows if r["interceptor"] == o]
+        n = EPISODES * len(g)
+        ki = sum(int(r["intercepts"]) + int(r["both"]) for r in g)
+        ks = sum(int(r["survived"]) for r in g)
+        tm = marginal([cell(rows, t, o, turns) for t in MODELS], 0)
+        print(f"{LABEL[o]:18s} intercepted={ki}/{n} ({wilson(ki, n)[0]:.1f}% [{wilson(ki, n)[1]:.1f}, {wilson(ki, n)[2]:.1f}])"
+              f"  survived={ks}/{n} ({wilson(ks, n)[0]:.1f}% [{wilson(ks, n)[1]:.1f}, {wilson(ks, n)[2]:.1f}])"
+              f"  turns against={tm[0]:.2f} ± {tm[1]:.2f}")
     print("\n## Outcomes by team (count / 384, Wilson 95%)")
     for t, o in team_outcomes(rows).items():
         print(f"{LABEL[t]:18s} " + "  ".join(f"{k}={o[k]} ({wilson(o[k], o['n'])[0]:.1f}% [{wilson(o[k], o['n'])[1]:.1f}, {wilson(o[k], o['n'])[2]:.1f}])"
                                               for k in ("intercepted", "miscomm", "survived")) + f"  both={o['both']}")
+
+
+# --- Statistics -----------------------------------------------------------------
+OUTCOMES = [  # (key, label, per-(cell, seed) value)
+    ("intercept", "interception share", intercept_share),
+    ("miscomm", "miscommunication share", lambda r: int(r["miscomms"]) / EPISODES),
+    ("survived", "survival share", lambda r: int(r["survived"]) / EPISODES),
+    ("turns", "turns per game", turns),
+]
+COMPONENTS = ["opponent", "team", "team x opponent", "between seeds"]
+JOBS = {0: 7668935, 1: 7668936, 2: 7668937}
+
+
+def cube(rows, fn):
+    """Balanced 4 (team) x 4 (opponent) x 3 (seed) array of a per-row value."""
+    return np.array([[[fn(r) for r in sorted(rows, key=lambda r: r["seed"])
+                       if r["encoder"] == t and r["interceptor"] == o] for o in MODELS] for t in MODELS])
+
+
+def anova2(rows, fn):
+    """Two-way ANOVA with replication (team, opponent; 3 seeds per cell). Returns
+    sums of squares, eta^2 (share of the total sum of squares), F and p for the two
+    main effects and the interaction; the residual is the between-seed variation."""
+    Y = cube(rows, fn)
+    a, b, n = Y.shape
+    gm = Y.mean()
+    tm, om, cm = Y.mean(axis=(1, 2)), Y.mean(axis=(0, 2)), Y.mean(axis=2)
+    ss = {
+        "team": b * n * ((tm - gm) ** 2).sum(),
+        "opponent": a * n * ((om - gm) ** 2).sum(),
+        "team x opponent": n * ((cm - tm[:, None] - om[None, :] + gm) ** 2).sum(),
+        "between seeds": ((Y - cm[:, :, None]) ** 2).sum(),
+    }
+    df = {"team": a - 1, "opponent": b - 1, "team x opponent": (a - 1) * (b - 1), "between seeds": a * b * (n - 1)}
+    total = sum(ss.values())
+    ms_e = ss["between seeds"] / df["between seeds"]
+    out = {}
+    for k in COMPONENTS:
+        f = (ss[k] / df[k]) / ms_e if k != "between seeds" else float("nan")
+        p = stats.f.sf(f, df[k], df["between seeds"]) if k != "between seeds" else float("nan")
+        out[k] = {"ss": ss[k], "df": df[k], "eta2": ss[k] / total, "F": f, "p": p}
+    return out
+
+
+def binomial_dispersion(rows, fn):
+    """Is the seed-to-seed spread within a cell larger than binomial sampling of 32
+    games predicts? Pearson heterogeneity X^2 over cells with 0 < p < 1 (df = 2 each),
+    and the ratio of observed to expected within-cell variance."""
+    Y = cube(rows, fn)
+    x2, dfs, obs_var, exp_var = 0.0, 0, [], []
+    for i in range(4):
+        for j in range(4):
+            ks = Y[i, j] * EPISODES
+            p = ks.sum() / (EPISODES * len(ks))
+            if 0 < p < 1:
+                x2 += (((ks - EPISODES * p) ** 2) / (EPISODES * p * (1 - p))).sum()
+                dfs += len(ks) - 1
+            obs_var.append(Y[i, j].var(ddof=1))
+            exp_var.append(p * (1 - p) / EPISODES)
+    return {"X2": x2, "df": dfs, "p": stats.chi2.sf(x2, dfs), "ratio": float(np.mean(obs_var) / np.mean(exp_var))}
+
+
+def pooled_counts(rows, by, key):
+    """Pooled counts (k, n) of an outcome per level of `by` (team or opponent)."""
+    col = "encoder" if by == "team" else "interceptor"
+    k = {"intercept": lambda r: int(r["intercepts"]) + int(r["both"]),
+         "miscomm": lambda r: int(r["miscomms"]), "survived": lambda r: int(r["survived"])}[key]
+    return {m: (sum(k(r) for r in rows if r[col] == m), EPISODES * sum(1 for r in rows if r[col] == m)) for m in MODELS}
+
+
+def chi2_levels(counts):
+    table = [[k, n - k] for k, n in counts.values()]
+    chi2, p, dof, _ = stats.chi2_contingency(table, correction=False)
+    return chi2, dof, p
+
+
+def fisher_vs_rest(counts, level):
+    k1, n1 = counts[level]
+    k2 = sum(k for m, (k, n) in counts.items() if m != level)
+    n2 = sum(n for m, (k, n) in counts.items() if m != level)
+    odds, p = stats.fisher_exact([[k1, n1 - k1], [k2, n2 - k2]])
+    return (k1, n1), (k2, n2), odds, p
+
+
+def grand_mean_se(cells):
+    """Mean of 16 (mean, se) cells and its SE, cells treated as independent."""
+    return st.mean(m for m, _ in cells), math.sqrt(sum(s * s for _, s in cells)) / len(cells)
+
+
+def audit_logs():
+    """Counts from the job logs (logs/ is not in git; skipped when absent). Only the
+    final attempt of each job is counted: that attempt produced the CSV."""
+    out = {}
+    for seed, jid in JOBS.items():
+        path = os.path.join(REPO, "logs", "paper", f"polaris_fused4_{jid}.log")
+        if not os.path.exists(path):
+            out[seed] = None
+            continue
+        with open(path, errors="replace") as f:
+            lines = f.read().split("\n")
+        starts = [i for i, l in enumerate(lines) if l.startswith("=== fused 4-model job ")]
+        fin = lines[starts[-1]:]
+        out[seed] = {
+            "attempts": len(starts),
+            "claude_timeouts": sum("subprocess.TimeoutExpired" in l for l in fin),
+            "claude_cli_errors": sum(("claude -p failed" in l) or ("claude -p error" in l) for l in fin),
+            "rate_limit_msgs": sum(any(s in l for s in ("RateLimitError", "Rate limited", "usage limit", "rate limit")) for l in fin),
+            # one vLLM access-log line per rejected request (each error's message is printed twice)
+            "context_400": sum('"POST /v1/chat/completions HTTP/1.1" 400' in l for l in fin),
+            "context_msgs": sum("maximum context length" in l and "serving_chat.py" in l for l in fin),
+        }
+    return out
+
+
+def statistics_report(rows):
+    print("\n## Two-way ANOVA (team, opponent, interaction; residual = between seeds), eta^2 = SS / SS_total")
+    parts = {}
+    for key, label, fn in OUTCOMES:
+        a = anova2(rows, fn)
+        parts[key] = a
+        print(f"{label:24s} " + "  ".join(
+            f"{k}: eta2={a[k]['eta2']:.3f}" + (f" F({a[k]['df']},{a['between seeds']['df']})={a[k]['F']:.2f} p={a[k]['p']:.2g}" if k != "between seeds" else "")
+            for k in COMPONENTS))
+    print("\n## Between-seed spread vs binomial sampling (Pearson heterogeneity over cells with 0<p<1)")
+    for key, label, fn in OUTCOMES[:3]:
+        d = binomial_dispersion(rows, fn)
+        print(f"{label:24s} X2={d['X2']:.1f} df={d['df']} p={d['p']:.2f} observed/expected variance={d['ratio']:.2f}")
+    print("\n## Pooled chi-square across levels (4 x 2 tables, 384 games per level)")
+    for by, key in [("opponent", "intercept"), ("team", "intercept"), ("team", "miscomm"), ("team", "survived"), ("opponent", "survived")]:
+        c = pooled_counts(rows, by, key)
+        chi2, dof, p = chi2_levels(c)
+        print(f"{key:9s} by {by:8s}: " + ", ".join(f"{LABEL[m]} {k}/{n}" for m, (k, n) in c.items()) + f" | chi2({dof})={chi2:.1f} p={p:.2g}")
+    print("\n## Single-level contrasts (Fisher exact, two-sided)")
+    for by, key, level in [("opponent", "intercept", "qwen3_4b"), ("team", "survived", "claude4.6_cli"),
+                           ("team", "miscomm", "qwen3_4b"), ("team", "miscomm", "claude4.6_cli")]:
+        (k1, n1), (k2, n2), odds, p = fisher_vs_rest(pooled_counts(rows, by, key), level)
+        print(f"{key:9s} {by} {LABEL[level]:18s} {k1}/{n1} ({100*k1/n1:.1f}%) vs rest {k2}/{n2} ({100*k2/n2:.1f}%) odds ratio={odds:.2f} p={p:.2g}")
+    c = pooled_counts(rows, "opponent", "intercept")
+    sub = {m: c[m] for m in ("qwen2.5_72B", "qwen3_8b")}
+    (k1, n1), (k2, n2), odds, p = fisher_vs_rest(sub, "qwen2.5_72B")
+    print(f"size contrast, as opponent: Qwen2.5-72B {k1}/{n1} vs Qwen3-8B {k2}/{n2}, Fisher p={p:.2g}")
+    t72 = [turns(r) for r in sorted(rows, key=lambda r: (r["interceptor"], r["seed"])) if r["encoder"] == "qwen2.5_72B"]
+    t8 = [turns(r) for r in sorted(rows, key=lambda r: (r["interceptor"], r["seed"])) if r["encoder"] == "qwen3_8b"]
+    tt = stats.ttest_rel(t72, t8)
+    print(f"size contrast, as team turns: Qwen2.5-72B {st.mean(t72):.2f} vs Qwen3-8B {st.mean(t8):.2f}, "
+          f"paired over 12 (opponent, seed) pairs: diff={st.mean(t72) - st.mean(t8):.2f} t(11)={tt.statistic:.2f} p={tt.pvalue:.2g}")
+    tc = [turns(r) for r in sorted(rows, key=lambda r: (r["interceptor"], r["seed"])) if r["encoder"] == "claude4.6_cli"]
+    for other in ("qwen2.5_72B", "qwen3_8b", "qwen3_4b"):
+        to = [turns(r) for r in sorted(rows, key=lambda r: (r["interceptor"], r["seed"])) if r["encoder"] == other]
+        tt = stats.ttest_rel(tc, to)
+        print(f"team turns Claude {st.mean(tc):.2f} vs {LABEL[other]} {st.mean(to):.2f}: diff={st.mean(tc) - st.mean(to):.2f} t(11)={tt.statistic:.2f} p={tt.pvalue:.2g}")
+    print("\n## This run vs the paper's LLM-only block (grand mean of 16 cells, SE propagated from cell SEs)")
+    idx = [PAPER_AGENTS.index(x) for x in PAPER_LLMS]
+    for label, fn, paper in [("interception share", intercept_share, PAPER_INTERCEPT), ("turns per game", turns, PAPER_TURNS)]:
+        ours = grand_mean_se([cell(rows, t, o, fn) for t in MODELS for o in MODELS])
+        theirs = grand_mean_se([paper[i][j] for i in idx for j in idx])
+        z = (ours[0] - theirs[0]) / math.sqrt(ours[1] ** 2 + theirs[1] ** 2)
+        print(f"{label:20s} ours {ours[0]:.3f} ± {ours[1]:.3f} | paper {theirs[0]:.3f} ± {theirs[1]:.3f} | diff {ours[0]-theirs[0]:+.3f} z={z:.2f} p={2*stats.norm.sf(abs(z)):.2g}")
+    # Same comparison without each study's weakest interceptor (Qwen3-4B here,
+    # Llama-3.1-8B in the paper): how much of the gap that one column carries.
+    ours_wo = grand_mean_se([cell(rows, t, o, intercept_share) for t in MODELS for o in MODELS if o != "qwen3_4b"])
+    jw = [j for j in idx if PAPER_AGENTS[j] != "Llama-3.1-8B"]
+    theirs_wo = grand_mean_se([PAPER_INTERCEPT[i][j] for i in idx for j in jw])
+    z = (ours_wo[0] - theirs_wo[0]) / math.sqrt(ours_wo[1] ** 2 + theirs_wo[1] ** 2)
+    print(f"interception share without the weakest interceptor: ours {ours_wo[0]:.3f} ± {ours_wo[1]:.3f} | paper "
+          f"{theirs_wo[0]:.3f} ± {theirs_wo[1]:.3f} | diff {ours_wo[0]-theirs_wo[0]:+.3f} z={z:.2f} p={2*stats.norm.sf(abs(z)):.2g}")
+    print("\n## Survival: team x opponent residuals (observed - additive prediction), games survived per 32")
+    Y = cube(rows, lambda r: int(r["survived"]))
+    gm, tm, om, cmn = Y.mean(), Y.mean(axis=(1, 2)), Y.mean(axis=(0, 2)), Y.mean(axis=2)
+    res = [(cmn[i, j] - (tm[i] + om[j] - gm), MODELS[i], MODELS[j], cmn[i, j]) for i in range(4) for j in range(4)]
+    for r_, t, o, obs in sorted(res, key=lambda x: -abs(x[0]))[:3]:
+        print(f"team {LABEL[t]:18s} vs {LABEL[o]:18s} observed {obs:.2f}, additive prediction {obs - r_:.2f}, residual {r_:+.2f}")
+    print("\n## Retries (CSV avg_*_attempts: mean retries per turn)")
+    for role in ("encoder", "decoder", "interceptor"):
+        a = [float(r[f"avg_{role}_attempts"]) for r in rows]
+        print(f"{role:11s} mean={st.mean(a):.4f} max={max(a):.3f}; final fails={sum(int(r[f'total_{role}_fails']) for r in rows)}")
+    print("\n## Log audit (final attempt per job)")
+    for seed, a in audit_logs().items():
+        print(f"seed {seed} (job {JOBS[seed]}): {a if a else 'log not found'}")
+    return parts
+
+
+def fig_variance(parts):
+    colors = {"opponent": "#2a78d6", "team": "#eb6834", "team x opponent": "#1baf7a", "between seeds": "#eda100"}
+    names = {"intercept": "Games ending in an interception", "miscomm": "Games ending in a miscommunication",
+             "survived": "Games the team survived", "turns": "Turns per game"}
+    order = ["intercept", "turns", "miscomm", "survived"]
+    fig, ax = plt.subplots(figsize=(10.5, 4.4))
+    for y, key in enumerate(order):
+        left = 0.0
+        for comp in COMPONENTS:
+            w = parts[key][comp]["eta2"]
+            ax.barh(y, w, left=left, height=0.5, color=colors[comp], edgecolor=SURFACE, linewidth=1.5)
+            if w >= 0.09:
+                ax.text(left + w / 2, y, f"{100*w:.0f}%", ha="center", va="center", fontsize=9,
+                        color=("white" if comp in ("opponent",) else INK))
+            left += w
+    ax.set_yticks(range(len(order)))
+    ax.set_yticklabels([names[k] for k in order])
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1)
+    ax.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
+    ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+    ax.set_xlabel("share of the variation across the 48 (match-up, seed) results")
+    style_axes(ax)
+    ax.grid(False)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=colors[c]) for c in COMPONENTS]
+    fig.legend(handles, ["which opponent", "which team", "this team against this opponent (interaction)", "between seeds (sampling)"],
+               loc="upper center", ncol=4, frameon=False, bbox_to_anchor=(0.55, 0.99), fontsize=9)
+    fig.subplots_adjust(left=0.27, right=0.97, top=0.86)
+    add_caption(fig, axis_band=0.15, text=
+        "Where the differences between results come from. For each outcome, the bar splits the variation across the 16 "
+        "match-ups x 3 seeds into the part explained by which model was the opponent, which model was the team, the specific "
+        "pairing beyond those two, and the leftover differences between seeds. Interceptions, survival and game length are "
+        "set mostly by the opponent; miscommunications mostly by the team. Only survival has a sizeable pairing-specific part, "
+        "which comes from the Claude team against the Qwen3-4B opponent.", width=125)
+    out = os.path.join(OUTDIR, "fig4_variance_partition.png")
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    return out
 
 
 def main():
@@ -334,6 +566,8 @@ def main():
     for fn in (fig_grids, fig_vs_paper, fig_outcomes):
         print("wrote", os.path.relpath(fn(rows), REPO))
     print_tables(rows)
+    parts = statistics_report(rows)
+    print("wrote", os.path.relpath(fig_variance(parts), REPO))
 
 
 if __name__ == "__main__":
