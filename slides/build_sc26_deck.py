@@ -61,6 +61,39 @@ def rgb(h):
     return RGBColor.from_string(h)
 
 
+# Figures from our earlier analyses, cropped to the plot (their long captions go to the notes).
+# Crops are regenerated from the sources when those exist and committed under slides/figures/.
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+MARSHAL_REPO = os.path.join(os.path.dirname(REPO), "MARSHAL")
+FIGS = {
+    "decrypto_diagram": (os.path.join(REPO, "assets", "Decrypto Game Diagram.png"), None),
+    "decrypto_grids": (os.path.join(REPO, "results", "polaris_4model_competitive", "figures",
+                                    "fig1_competitive_grids.png"), (0, 0, 1800, 715)),
+    "marshal_forfeits": (os.path.join(MARSHAL_REPO, "analysis", "r6", "out",
+                                      "fig1_r6_vs_r5_validation.png"), (0, 740, 1160, 1515)),
+    "marshal_selfplay": (os.path.join(MARSHAL_REPO, "analysis", "r6", "out",
+                                      "fig2_training_selfplay.png"), (0, 0, 870, 760)),
+}
+
+
+def figure(key):
+    from PIL import Image
+    src, box = FIGS[key]
+    out = os.path.join(HERE, "figures", key + ".png")
+    if os.path.exists(src):
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        im = Image.open(src)
+        if box:
+            im = im.crop(box)
+        if im.mode in ("RGBA", "LA", "P"):
+            im = im.convert("RGBA")
+            bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+            im = Image.alpha_composite(bg, im)
+        im.convert("RGB").save(out)
+    return out
+
+
 # --------------------------------------------------------------------------- text model
 def P(text, size=14, family="sans", color=INK, bold=False, italic=False, align="l",
       sb=0, sa=0, ls=1.0, spc=0, hang=None):
@@ -194,6 +227,17 @@ class Deck:
             te.set("len", "med")
         self.ops.append(("line", dict(x1=x1, y1=y1, x2=x2, y2=y2, color=color, lw=lw, arrow=arrow)))
         return c
+
+    def pic(self, path, x, y, w=None, h=None):
+        from PIL import Image
+        iw, ih = Image.open(path).size
+        if w is None:
+            w = h * iw / ih
+        if h is None:
+            h = w * ih / iw
+        self.s.shapes.add_picture(path, Inches(x), Inches(y), Inches(w), Inches(h))
+        self.ops.append(("image", dict(x=x, y=y, w=w, h=h, path=path)))
+        return w, h
 
     def text(self, x, y, w, h, paras, anchor="t", fill=None, pad=0.0, name=""):
         if isinstance(paras, dict):
@@ -331,8 +375,14 @@ class Deck:
                     else:
                         ax.plot([o["x1"], o["x2"]], [o["y1"], o["y2"]], color="#" + o["color"],
                                 lw=o["lw"], zorder=z, solid_capstyle="butt")
+                elif kind == "image":
+                    import matplotlib.image as mpimg
+                    ax.imshow(mpimg.imread(o["path"]), zorder=z, aspect="auto",
+                              extent=(o["x"], o["x"] + o["w"], o["y"] + o["h"], o["y"]))
                 else:
                     self._render_text(ax, o, fp, z)
+            ax.set_xlim(0, W)
+            ax.set_ylim(H, 0)
             p = os.path.join(outdir, f"slide_{idx}.png")
             fig.savefig(p, dpi=100)
             plt.close(fig)
@@ -386,132 +436,79 @@ def slide1(d):
     d.slide(notes=NOTES[1])
     d.rect(0, 0, W, H, fill=MAROON)
     d.text(0.9, 0.75, 8, 0.3, P("THE UNIVERSITY OF CHICAGO", size=12, bold=True, color=WHITE, spc=250))
-    d.text(0.9, 1.9, 11.5, 1.1, P("Can LLMs reason?", size=58, family="serif", color=WHITE))
-    d.text(0.9, 3.05, 11.5, 0.9, P("Testing and training language models with games on the Polaris "
+    d.text(0.9, 2.15, 11.5, 1.15, P("Can LLMs reason?", size=60, family="serif", color=WHITE))
+    d.text(0.9, 3.4, 11.5, 0.95, P("Testing and training language models with games on the Polaris "
                                    "supercomputer", size=26, family="serif", color=WHITE))
-    d.line(0.9, 4.15, 6.5, 4.15, color=GREY_L, lw=1.0)
-    d.text(0.9, 4.35, 11.5, 0.95, [
-        P("**Decrypto** measures whether a model can give hints that its partner understands and its "
-          "opponent does not.", size=16, color=GREY_L, sa=6),
-        P("**MARSHAL** trains a model by having it play games against itself, then measures what "
-          "changed.", size=16, color=GREY_L)])
-    d.text(0.9, 5.75, 11.5, 0.35, P("[Presenter name]  ·  [Department], The University of Chicago",
+    d.line(0.9, 4.6, 6.5, 4.6, color=GREY_L, lw=1.0)
+    d.text(0.9, 5.45, 11.5, 0.35, P("[Presenter name]  ·  [Department], The University of Chicago",
                                     size=16, color=WHITE))
-    d.text(0.9, 6.2, 11.5, 0.6, P("SC26  ·  Computing time on Polaris, Argonne Leadership Computing "
-                                  "Facility (project lighthouse-uchicago)", size=12, color=GREY_L))
+    d.text(0.9, 5.9, 11.5, 0.35, P("SC26  ·  Polaris, Argonne Leadership Computing Facility",
+                                   size=13, color=GREY_L))
 
 
 def slide2(d):
     d.slide(notes=NOTES[2])
-    d.frame("QUESTION AND DESIGN",
-            "We used games to test and to train reasoning, because a game scores itself")
-    d.text(0.6, 1.92, 12.13, 0.85, P(
-        "Exam-style benchmarks can leak into a model's training data, and grading free-form answers needs "
-        "a person or a second model. We were geared towards problems that are new on every deal and that "
-        "the rules alone can score, so we chose games. One project measured models as they are; the other "
-        "trained a model and measured it again.", size=15, color=INK2, ls=1.05), name="intro")
-    cards = [
-        (0.6, DEC, "DECRYPTO  ·  MEASURE", [
-            "**Question.** Can a model give hints that its partner understands and its opponent does not?",
-            "**Design.** Four models. Each model's team played every model as opponent: 3 seeds × 32 "
-            "games per pairing, 1,536 games, no training.",
-            "**Machine.** Three 4-node jobs, one per seed. Each served three models and called the "
-            "fourth over the internet."]),
-        (6.83, MAR, "MARSHAL  ·  TRAIN", [
-            "**Question.** Does a 4-billion-parameter model play better, including at games it never "
-            "trained on, after playing against itself?",
-            "**Design.** Two training runs of 200 steps (one game; three games), each checked every 10 "
-            "steps on 15 fixed test conditions.",
-            "**Machine.** 3 and 4 nodes; the longer run needed 34 starts on a shared queue."]),
-    ]
-    for x, col, label, paras in cards:
-        d.rect(x, 2.95, 5.9, 2.75, line=GREY_L, lw=1.0)
-        d.rect(x, 2.95, 5.9, 0.08, fill=col)
-        d.text(x + 0.25, 3.18, 5.4, 0.25, P(label, size=11, bold=True, color=INK2, spc=150))
-        d.text(x + 0.25, 3.55, 5.4, 2.05, [P(t, size=14, color=INK, sa=7, ls=1.0) for t in paras],
-               name=label)
-    d.text(0.6, 5.84, 12.13, 1.03, P(
-        "**Polaris** (Argonne Leadership Computing Facility): each node has 4 NVIDIA A100 graphics "
-        "processors (GPUs) with 40 GB of memory each. The supercomputing problem was fitting models and "
-        "software written for 8-GPU servers with 80 GB cards, hundreds of simultaneous games, and "
-        "multi-day runs onto a shared machine.", size=13.5, color=INK), fill=TINT, pad=0.15,
-        name="polaris strip")
+    d.frame("QUESTION AND DESIGN", "We measured reasoning with one game and trained it with others")
+    # Decrypto: measure
+    d.rect(0.6, 2.0, 0.15, 0.15, fill=DEC)
+    d.text(0.86, 1.95, 6.0, 0.26, P("DECRYPTO  ·  MEASURE", size=12, bold=True, color=INK2, spc=150))
+    d.text(0.6, 2.28, 6.9, 0.3, P("4 models  ·  1,536 games  ·  no training", size=15))
+    d.pic(figure("decrypto_diagram"), 0.6, 2.75, w=6.9)
+    d.text(0.6, 5.4, 6.9, 0.22, P("Game diagram: Lupu, Willi & Foerster (2025)", size=9.5, color=MUTED))
+    # MARSHAL: train
+    mx = 8.0
+    d.rect(mx, 2.0, 0.15, 0.15, fill=MAR)
+    d.text(mx + 0.26, 1.95, 4.5, 0.26, P("MARSHAL  ·  TRAIN", size=12, bold=True, color=INK2, spc=150))
+    d.text(mx, 2.28, 4.73, 0.3, P("Qwen3-4B plays itself  ·  200 steps", size=15))
+    bw, bh, gx, gy = 2.05, 1.0, 0.63, 0.55
+    boxes = [(mx, 2.85, "Play", "model plays both seats"),
+             (mx + bw + gx, 2.85, "Score", "game engine judges"),
+             (mx + bw + gx, 2.85 + bh + gy, "Learn", "favor winning moves"),
+             (mx, 2.85 + bh + gy, "Copy", "new model to players")]
+    for x, y, t, body in boxes:
+        d.rect(x, y, bw, bh, line=MAR, lw=1.5, radius=0.08)
+        d.text(x + 0.12, y, bw - 0.24, bh, [P(f"**{t}**", size=15, align="c", sa=2),
+                                            P(body, size=11.5, color=INK2, align="c")], anchor="m", name=t)
+    ym1, ym2 = 2.85 + bh / 2, 2.85 + bh + gy + bh / 2
+    d.line(mx + bw, ym1, mx + bw + gx, ym1, color=GREY_D, lw=1.5, arrow=True)
+    d.line(mx + bw + gx + bw / 2, 2.85 + bh, mx + bw + gx + bw / 2, 2.85 + bh + gy, color=GREY_D, lw=1.5,
+           arrow=True)
+    d.line(mx + bw + gx, ym2, mx + bw, ym2, color=GREY_D, lw=1.5, arrow=True)
+    d.line(mx + bw / 2, 2.85 + bh + gy, mx + bw / 2, 2.85 + bh, color=GREY_D, lw=1.5, arrow=True)
+    # Polaris strip
+    d.text(0.6, 5.85, 12.13, 0.72, P("**Polaris**  ·  4 NVIDIA A100 GPUs (40 GB each) per node  ·  "
+                                     "our jobs used 3 to 4 nodes", size=16, align="c"),
+           fill=TINT, anchor="m", pad=0.12, name="polaris strip")
 
 
 def slide3(d):
     d.slide(notes=NOTES[3])
-    d.frame("DECRYPTO  ·  MEASURING REASONING",
-            "The opponent cracked the code in 95% of 1,536 games, and games ended after about 4 rounds",
+    d.frame("DECRYPTO  ·  RESULT",
+            "The opponent cracked the code in 95% of 1,536 games; teams lasted about 4 of 8 rounds",
             marker=DEC)
-    # game diagram
-    d.rect(0.6, 1.98, 5.7, 1.3, line=DEC, lw=1.5, radius=0.08)
-    d.text(0.8, 2.08, 5.3, 1.15, [
-        P("**Encoder** (team)", size=14, sa=5),
-        P("Sees four keywords:  1 boat · 2 direction · 3 viking · 4 foot", size=13, color=INK2, sa=3),
-        P("Draws the code 3-1-4 and writes:  **norse · sail · step**", size=13, color=INK2)],
-        name="encoder")
-    d.line(2.0, 3.28, 2.0, 3.76, color=GREY_D, lw=1.25, arrow=True)
-    d.line(4.9, 3.28, 4.9, 3.76, color=GREY_D, lw=1.25, arrow=True)
-    d.rect(0.6, 3.78, 2.7, 1.38, line=DEC, lw=1.5, radius=0.08)
-    d.text(0.78, 3.88, 2.38, 1.22, [
-        P("**Decoder** (teammate)", size=14, sa=5),
-        P("Knows the keywords. Guesses 3-1-4.", size=13, color=INK2)], name="decoder")
-    d.rect(3.6, 3.78, 2.7, 1.38, line=GREY_D, lw=1.5, radius=0.08)
-    d.text(3.78, 3.88, 2.38, 1.22, [
-        P("**Interceptor** (opponent)", size=14, sa=5),
-        P("Cannot see the keywords but keeps every earlier hint. Guesses the code too.", size=13,
-          color=INK2)], name="interceptor")
-    d.text(0.6, 5.36, 5.7, 0.55, P(
-        "The team loses after 2 interceptions or 2 misreads, and wins by lasting 8 rounds.", size=13.5,
-        color=INK), name="rules")
-    d.text(0.6, 6.02, 5.7, 0.42, P(
-        "Keywords and hints are from one of our logged games; the code and hint order are illustrative.",
-        size=10.5, color=MUTED), name="caption")
-    # chart: how the games ended
-    cx, scale = 6.85, 4.3 / 1536
-    d.text(cx, 1.98, 5.88, 0.3, P("How the 1,536 games ended", size=13, bold=True))
-    rows = [("Opponent cracked the code twice", 1454, "1,454  (94.7%)", DEC),
-            ("Team lasted all 8 rounds", 44, "44  (2.9%)", GREY_D),
-            ("Team misread its own hints twice", 38, "38  (2.5%)", GREY_D)]
-    y = 2.38
-    for label, v, vl, col in rows:
-        d.text(cx, y, 5.88, 0.24, P(label, size=12, color=INK2))
-        bw = v * scale
-        d.rect(cx, y + 0.28, bw, 0.22, fill=col)
-        d.text(cx + bw + 0.08, y + 0.255, 1.6, 0.27, P(vl, size=12, bold=True, color=INK))
-        y += 0.64
-    d.text(cx, 4.35, 5.88, 1.38, [
-        P("Games lasted 4.31 ± 0.03 rounds, against 4.33 ± 0.03 in the original study's model games "
-          "(p = 0.65; UNVERIFIED) and 6.90 rounds for its 10 human games (UNVERIFIED).", size=13,
-          color=INK, sa=6),
-        P("The opponent set the outcome: it explained 49% of the variation in interceptions and 88% "
-          "in game length. The team explained 53% of the variation in misreads.", size=13, color=INK)],
-        name="results")
-    d.therefore(cx, 5.82, 5.88, 0.72, "Therefore these models read hints well as partners and as "
-                "eavesdroppers, but rarely wrote hints that kept an informed opponent out.", size=13.5)
-    d.text(0.6, 6.6, 12.13, 0.36, P(
-        "Models: Qwen2.5-72B, Qwen3-8B, Qwen3-4B, Claude Sonnet 4.6. A team is one model as both encoder "
-        "and decoder. Settings from Lupu, Willi & Foerster (2025), temperature 0.6.", size=10.5,
-        color=MUTED), name="footnote")
+    w = 11.0
+    d.pic(figure("decrypto_grids"), (W - w) / 2, 1.88, w=w)
+    d.therefore(0.6, 6.42, 12.13, 0.5, "Therefore the models read hints well but rarely wrote hints an "
+                "informed opponent could not crack. Human teams in the original study lasted 6.9 rounds "
+                "(UNVERIFIED).", size=13)
 
 
 def slide4(d):
     d.slide(notes=NOTES[4])
     d.frame("DECRYPTO  ·  ON POLARIS",
-            "We served four models from one 4-node job, and the slowest model set how many games "
-            "could run at once", marker=DEC)
+            "One 4-node job served four models; the slowest model set how many games could run at once",
+            marker=DEC)
     # node diagram
     d.rect(0.6, 1.98, 2.45, 0.62, line=GREY_D, lw=1.0, radius=0.08)
     d.text(0.72, 2.03, 2.21, 0.52, [P("**Claude Sonnet 4.6**", size=11.5),
-                                    P("Anthropic, over the internet", size=10.5, color=INK2)],
+                                    P("over the internet", size=10.5, color=INK2)],
            anchor="m", name="claude")
     d.line(1.82, 3.0, 1.82, 2.62, color=GREY_D, lw=1.25, arrow=True)
     d.rect(0.6, 3.0, 2.45, 2.4, line=GREY_D, lw=1.0, radius=0.08)
     d.text(0.75, 3.1, 2.15, 0.25, P("**Node 0 · game runner**", size=11.5))
     d.gpu_row(0.75, 3.45, [None] * 4)
-    d.text(0.75, 3.9, 2.15, 1.45, P("Runs 16 games at a time; no GPU work. Reaches Claude through the "
-                                    "lab's web proxy.", size=11, color=INK2), name="node0")
-    nodes = [(1.98, "Node 1 · Qwen2.5-72B", [DEC] * 4, "136 GB of weights: 34 of 40 GB on each GPU"),
+    d.text(0.75, 3.9, 2.15, 1.45, P("16 games at a time; no GPU work", size=11, color=INK2), name="node0")
+    nodes = [(1.98, "Node 1 · Qwen2.5-72B", [DEC] * 4, "34 of 40 GB per GPU hold the weights"),
              (3.48, "Node 2 · Qwen3-8B", [DEC, None, None, None], "One GPU"),
              (4.73, "Node 3 · Qwen3-4B", [DEC, None, None, None], "One GPU")]
     for y, label, fills, desc in nodes:
@@ -521,115 +518,62 @@ def slide4(d):
         d.gpu_row(3.7, y + 0.4, fills)
         d.text(3.7, y + 0.78, 2.6, hh - 0.82, P(desc, size=10.5, color=INK2), name=label)
         d.line(3.05, 4.2, 3.55, y + hh / 2, color=GREY_D, lw=1.0, arrow=True)
-    d.text(0.6, 5.88, 5.8, 0.38, P("Filled squares are GPUs holding a model: 6 of 16. Polaris "
-                                   "allocates whole nodes.", size=10.5, color=MUTED), name="caption")
-    # findings
+    d.text(0.6, 5.9, 5.8, 0.3, P("Filled squares: GPUs holding a model (6 of 16)", size=10.5, color=MUTED))
+    # right: concurrency chart + two facts
     rx, rw = 6.9, 5.83
-    d.text(rx, 1.98, rw, 1.0, P(
-        "**Memory.** The 72-billion-parameter model fit only when split across all 4 GPUs of a node. "
-        "What remained held 18,800 tokens of conversation, about 2.3 full-length requests at once, and "
-        "the model loaded on our third configuration.", size=12.5), name="memory")
-    d.text(rx, 3.05, rw, 0.26, P("Games completed in the earlier 3-model run (405 games)", size=12,
-                                 bold=True))
-    scale = 3.3 / 405
-    y = 3.38
+    d.text(rx, 1.98, rw, 0.3, P("Games completed out of 405", size=13, bold=True))
+    scale = 3.6 / 405
+    y = 2.4
     for label, v, vl, col in [("All 405 games at once", 245, "245", GREY_D),
-                              ("24 games at a time", 403, "403  (+2 after a parser fix)", DEC)]:
-        d.text(rx, y, rw, 0.22, P(label, size=11, color=INK2))
-        d.rect(rx, y + 0.25, v * scale, 0.2, fill=col)
-        d.text(rx + v * scale + 0.08, y + 0.225, 2.4, 0.25, P(vl, size=11, bold=True))
-        y += 0.56
-    d.text(rx, 4.55, rw, 0.78, P(
-        "**Concurrency.** With all 405 games at once, the 72B server dropped 610 of 1,929 requests (32%) "
-        "and 160 games were lost. With 24 at a time it dropped 0 of 1,736, and the run took 2 h 27 min.",
-        size=12.5), name="concurrency")
-    d.text(rx, 5.36, rw, 0.92, P(
-        "**Scheduling.** Separate server and game jobs started hours apart, and the servers ran out their "
-        "time limits idle. One job holding all four nodes starts them together. A 10-hour request started "
-        "2.5 h after submission; a 16-hour request had waited 32 h with no start time.", size=12.5),
-        name="scheduling")
-    d.therefore(0.6, 6.32, 12.13, 0.58, "Therefore the number of simultaneous games has to be set by the "
-                "memory of the slowest model, not by the number of games to play.", size=13.5)
+                              ("24 games at a time", 403, "403 (+2 after a fix)", DEC)]:
+        d.text(rx, y, rw, 0.24, P(label, size=12, color=INK2))
+        d.rect(rx, y + 0.28, v * scale, 0.28, fill=col)
+        d.text(rx + v * scale + 0.08, y + 0.29, 2.2, 0.27, P(vl, size=12, bold=True))
+        y += 0.7
+    d.text(rx, 3.88, rw, 0.55, P("Requests the 72B server dropped:  610 of 1,929 (32%)  →  0 of 1,736",
+                                 size=12.5, color=INK2), name="dropped")
+    d.line(rx, 4.55, rx + rw, 4.55, color=GREY_L, lw=0.75)
+    d.text(rx, 4.7, rw, 0.6, P("**Memory**  ·  the 72B fit only split across 4 GPUs, with room for about "
+                               "2 full-length requests", size=12.5), name="memory")
+    d.text(rx, 5.4, rw, 0.6, P("**Scheduling**  ·  one job for all four nodes; a 10 h request started in "
+                               "2.5 h, a 16 h request waited 32 h", size=12.5), name="scheduling")
+    d.therefore(0.6, 6.38, 12.13, 0.5, "Therefore the number of simultaneous games has to be set by the "
+                "memory of the slowest model.", size=13.5)
 
 
 def slide5(d):
     d.slide(notes=NOTES[5])
-    d.frame("MARSHAL  ·  TRAINING REASONING",
-            "Self-play taught a 4-billion-parameter model to make legal moves within 10 steps; a better "
-            "strategy showed up in only one game", marker=MAR)
-    boxes = [(0.6, 1.98, "1 · Play", "The model plays both seats and reasons in text before each move."),
-             (3.35, 1.98, "2 · Score", "The engine returns win, draw, loss, or Hanabi's team "
-                                       "score. Illegal or over-long moves forfeit."),
-             (3.35, 3.6, "3 · Learn", "Shift the model toward the moves that preceded wins."),
-             (0.6, 3.6, "4 · Copy", "Send the updated model to the players, then play again.")]
-    for x, y, t, body in boxes:
-        d.rect(x, y, 2.35, 1.27, line=MAR, lw=1.5, radius=0.08)
-        d.text(x + 0.15, y + 0.1, 2.05, 1.1, [P(f"**{t}**", size=13, sa=3),
-                                              P(body, size=11.5, color=INK2)], name=t)
-    d.line(2.95, 2.6, 3.35, 2.6, color=GREY_D, lw=1.25, arrow=True)
-    d.line(4.52, 3.25, 4.52, 3.6, color=GREY_D, lw=1.25, arrow=True)
-    d.line(3.35, 4.23, 2.95, 4.23, color=GREY_D, lw=1.25, arrow=True)
-    d.line(1.77, 3.6, 1.77, 3.25, color=GREY_D, lw=1.25, arrow=True)
-    d.text(0.6, 5.05, 5.1, 1.15, [
-        P("**Trained on** TicTacToe, Kuhn poker and Mini Hanabi (a cooperative card game).", size=12,
-          sa=4),
-        P("**Tested** every 10 steps on games it never trained on (Connect Four, Leduc poker, Simple and "
-          "Full Hanabi) against fixed opponents: a search player and poker-solver strategies.", size=12)],
-        name="games")
-    # dumbbell chart
-    cx0, cx1 = 6.35, 12.35
-    xs = lambda v: cx0 + (cx1 - cx0) * v / 70.0
-    d.text(6.1, 1.98, 6.63, 0.28, P("Before and after training, three-game run (Qwen3-4B, 200 steps)",
-                                    size=12.5, bold=True))
-    d.rect(6.12, 2.36, 0.13, 0.13, fill=GREY_M, oval=True)
-    d.text(6.3, 2.3, 1.2, 0.24, P("before", size=11, color=INK2))
-    d.rect(7.12, 2.36, 0.13, 0.13, fill=MAR, oval=True)
-    d.text(7.3, 2.3, 1.2, 0.24, P("after", size=11, color=INK2))
-    top, rowh = 2.62, 0.74
-    for t in (0, 20, 40, 60):
-        d.line(xs(t), top, xs(t), top + 3 * rowh, color="E6E6E0", lw=0.75)
-        d.text(xs(t) - 0.3, top + 3 * rowh + 0.03, 0.6, 0.22, P(f"{t}%", size=10, color=MUTED, align="c"))
-    rows = [("Illegal-move forfeits, board games, model moving second (step 0 → 10–50)", 48.8, 0.8),
-            ("TicTacToe draws in games played out, moving second, vs a 1,000-simulation search player "
-             "(step 0 → 130–170)", 37.8, 59.6),
-            ("Forfeits on the 8 never-trained test conditions (steps 130–170 → 180–190)", 24.7, 63.8)]
-    for i, (label, a, b) in enumerate(rows):
-        y = top + i * rowh
-        d.text(6.1, y + 0.02, 6.63, 0.4, P(label, size=11, color=INK2), name=label)
-        ly = y + 0.5
-        d.line(xs(a), ly, xs(b), ly, color=GREY_M, lw=2.0)
-        d.rect(xs(a) - 0.075, ly - 0.075, 0.15, 0.15, fill=GREY_M, oval=True)
-        d.rect(xs(b) - 0.075, ly - 0.075, 0.15, 0.15, fill=MAR, oval=True)
-        for v, bold in ((a, False), (b, True)):
-            other = b if v == a else a
-            if v >= other:
-                d.text(xs(v) + 0.12, ly - 0.12, 0.8, 0.24, P(f"{v:.1f}%", size=10.5, bold=bold))
-            else:
-                d.text(xs(v) - 0.92, ly - 0.12, 0.8, 0.24, P(f"{v:.1f}%", size=10.5, bold=bold, align="r"))
-    d.text(6.1, 5.12, 6.63, 1.12, [
-        P("Mini Hanabi's team score rose from 1.05 (step 0) to 2.07 ± 0.06 (steps 130–170); the paper "
-          "reports 2.17 (App. J; UNVERIFIED). The draw gain passed a false-discovery correction "
-          "(q = 0.048); the first seat showed no gain.", size=11.5, sa=4),
-        P("Leduc poker, never trained, did not improve: at steps 130–170 the three-game run won 23.5% of "
-          "second-seat games, 20.9 ± 6.8 points below the one-game run (q = 0.038).", size=11.5)],
-        name="results")
-    d.therefore(0.6, 6.3, 12.13, 0.6, "Therefore self-play mostly taught the model to stop forfeiting "
-                "(legal moves, shorter reasoning). The strategic gain is one game and one seat, and it did "
-                "not reach Leduc poker.", size=13)
+    d.frame("MARSHAL  ·  RESULT",
+            "Self-play removed illegal moves within 10 steps; after step ~170 the training broke down",
+            marker=MAR)
+    h = 3.85
+    d.text(0.6, 1.92, 5.9, 0.28, P("Illegal moves in test games, model moving second", size=12.5,
+                                   bold=True))
+    w1, _ = d.pic(figure("marshal_forfeits"), 0.6, 2.25, h=h)
+    x2 = 0.6 + w1 + 0.3
+    d.text(x2, 1.92, 4.6, 0.28, P("TicTacToe self-play during training", size=12.5, bold=True))
+    w2, _ = d.pic(figure("marshal_selfplay"), x2, 2.25, h=h)
+    kx = x2 + w2 + 0.2
+    d.text(kx, 2.6, W - 0.6 - kx, 2.4, [
+        P("**R6**  three-game run", size=11.5, sa=6),
+        P("**R5**  TicTacToe-only run", size=11.5, sa=6),
+        P("Both: Qwen3-4B, 200 steps", size=11.5, color=INK2)], name="key")
+    d.therefore(0.6, 6.25, 12.13, 0.65, "Therefore self-play mostly taught the model to stop forfeiting. "
+                "The one strategic gain was TicTacToe draws as second mover (q = 0.048), Leduc poker did not "
+                "improve, and checkpoint 149 is the last clean model.", size=13)
 
 
 def slide6(d):
     d.slide(notes=NOTES[6])
     d.frame("MARSHAL  ·  ON POLARIS",
-            "Across 4 nodes, generating games took 65% of each training step; copying the model between "
-            "nodes took 0.2%", marker=MAR)
+            "Across 4 nodes, generating games took 65% of each training step; copying the model took 0.2%",
+            marker=MAR)
     # layout diagram
     d.rect(0.6, 1.98, 5.4, 1.5, line=MAR, lw=1.5, radius=0.08)
     d.text(0.75, 2.06, 5.1, 0.25, P("**Nodes 0–1 · learner**", size=12))
     d.gpu_row(0.75, 2.4, [MAR] * 4)
     d.gpu_row(2.35, 2.4, [MAR] * 4)
-    d.text(3.95, 2.36, 1.95, 1.05, P("Model split 4 ways in each node, 2 copies across nodes; a frozen "
-                                     "reference copy shares these GPUs.", size=10.5, color=INK2),
+    d.text(3.95, 2.4, 1.95, 1.0, P("model split 4 ways per node, 2 copies", size=10.5, color=INK2),
            name="learner")
     d.text(0.75, 2.8, 1.4, 0.22, P("node 0", size=9.5, color=MUTED))
     d.text(2.35, 2.8, 1.4, 0.22, P("node 1", size=9.5, color=MUTED))
@@ -641,52 +585,42 @@ def slide6(d):
     d.text(0.75, 4.18, 5.1, 0.25, P("**Nodes 2–3 · game players**", size=12))
     d.gpu_row(0.75, 4.52, [GOLD] * 4)
     d.gpu_row(2.35, 4.52, [GOLD] * 4)
-    d.text(3.95, 4.48, 1.95, 0.85, P("8 game-playing engines, 1 GPU each; 192 games per step (64 of "
-                                     "each game).", size=10.5, color=INK2), name="engines")
-    d.text(0.6, 5.55, 5.4, 0.68, P(
-        "The released code assumes one 8-GPU server (the paper used 80 GB H100s) with every role on every "
-        "GPU. On 40 GB cards we split the roles across nodes.", size=10.5, color=MUTED), name="note")
+    d.text(3.95, 4.52, 1.95, 0.85, P("8 engines, 1 GPU each; 192 games per step", size=10.5, color=INK2),
+           name="engines")
+    d.text(0.6, 5.55, 5.4, 0.62, P("The released code assumes one 8-GPU server; on 40 GB cards we split "
+                                   "the roles across nodes.", size=10.5, color=MUTED), name="note")
     # stacked bar: one step
     bx, bw, tot = 6.4, 6.33, 912.0
-    d.text(bx, 1.98, bw, 0.28, P("One training step: 15.2 min (mean of 176 steps)", size=12.5, bold=True))
+    d.text(bx, 1.98, bw, 0.28, P("One training step: 15.2 min (mean of 176 steps)", size=13, bold=True))
     segs = [("Generating games", 593, GOLD, INK), ("Learning", 219, MAR, WHITE),
             ("Re-scoring", 88, GREY_D, WHITE), ("Copy", 2.1, GREY_M, None), ("rest", 9.9, GREY_L, None)]
     x = bx
-    by, bh = 2.36, 0.42
+    by, bh = 2.38, 0.5
     for name, v, col, tc in segs:
         sw = bw * v / tot
         d.rect(x, by, max(sw - 0.02, 0.012), bh, fill=col)
         if name == "Generating games":
-            d.text(x + 0.1, by, sw - 0.2, bh, P("Generating games  593 s", size=11, bold=True, color=tc),
+            d.text(x + 0.1, by, sw - 0.2, bh, P("Generating games  593 s", size=12, bold=True, color=tc),
                    anchor="m")
         elif name == "Learning":
-            d.text(x + 0.06, by, sw - 0.1, bh, P("Learning  219 s", size=10, bold=True, color=tc,
+            d.text(x + 0.06, by, sw - 0.1, bh, P("Learning  219 s", size=10.5, bold=True, color=tc,
                                                  align="c"), anchor="m")
         elif name == "Re-scoring":
             d.text(x + 0.03, by, sw - 0.05, bh, P("88 s", size=10.5, bold=True, color=tc, align="c"),
                    anchor="m")
         x += sw
-    d.text(bx, 2.86, bw, 0.62, [
-        P("Learning: updating the model from the scored games. Re-scoring: the current and frozen copies "
-          "re-read each game (2 × 44 s). Copying the updated model to the players: 2.1 s.", size=10.5,
-          color=INK2)], name="legend")
-    d.text(bx, 3.58, bw, 0.92, P(
-        "**Network.** A fallback from Polaris's Slingshot network to ordinary TCP looks normal in the logs, "
-        "so each job fails unless the Slingshot provider is selected. Measured across 2 nodes: 36 GB/s "
-        "all-reduce bandwidth; at the measured 21 GB/s point-to-point rate, an 8 GB model copy takes "
-        "about 0.4 s.", size=12), name="network")
-    d.text(bx, 4.53, bw, 0.85, P(
-        "**Memory.** At 32,768 tokens per sequence the learner ran out of memory until it took one "
-        "sequence at a time. About 80% of training tokens were padding; trimming it cut learning from 253 s to "
-        "68 s per step in the 3-node run.", size=12), name="memory")
-    d.text(bx, 5.41, bw, 0.85, P(
-        "**Idle time.** Play and learning take turns, so in the final attempt (steps 105–199) GPUs were "
-        "busy 29% of the time on the learner nodes and 54% on the game nodes. Each step also waited for "
-        "its slowest game: 221 of 230 collections waited 5 min or more, TicTacToe the last in 207.",
-        size=12), name="idle")
-    d.therefore(0.6, 6.32, 12.13, 0.58, "Therefore the cost of this training is generating games, not "
-                "communication. We hypothesize that overlapping play with learning, not a faster network, "
-                "is the next speed-up.", size=13)
+    d.text(bx, 2.95, bw, 0.3, P("88 s: re-scoring each game  ·  2.1 s: copying the model to the players",
+                                size=10.5, color=INK2), name="legend")
+    facts = [
+        "**Network**  ·  36 GB/s all-reduce across 2 nodes; the job stops if traffic leaves Slingshot",
+        "**Memory**  ·  trimming padding (80% of tokens) cut learning from 253 s to 68 s per step",
+        "**Idle time**  ·  GPUs busy 29% (learner) and 54% (players): play and learning take turns"]
+    y = 3.6
+    for f in facts:
+        d.text(bx, y, bw, 0.66, P(f, size=13.5), name=f[:20])
+        y += 0.84
+    d.therefore(0.6, 6.38, 12.13, 0.5, "Therefore the cost of this training is generating games, not "
+                "communication.", size=13.5)
 
 
 def slide7(d):
@@ -695,8 +629,8 @@ def slide7(d):
             "Our 58 hours of compute took 10.6 days from submission; restarts kept 85% of the node time "
             "we held")
     d.text(0.6, 1.95, 12.13, 0.28, P(
-        "MARSHAL three-game run from submission to finish, in hours (4 nodes, preemptable queue, "
-        "13–23 October 2026)", size=12.5, bold=True))
+        "MARSHAL three-game run, submission to finish, in hours (4 nodes, preemptable queue, October 2026)",
+        size=12.5, bold=True))
     bx, bw, tot = 0.6, 12.13, 255.4
     by, bh = 2.62, 0.55
     segs = [(157.7, GREY_L, ["Waiting for the first start  ·  157.7 h (6.6 days)"], INK),
@@ -721,69 +655,45 @@ def slide7(d):
         tx = bx + bw * t / tot
         d.line(tx, by + bh + 0.02, tx, by + bh + 0.08, color=GREY_D, lw=0.75)
         d.text(tx - 0.4, by + bh + 0.09, 0.8, 0.22, P(f"{t} h", size=10, color=MUTED, align="c"))
-    # two columns
-    d.text(0.6, 3.62, 5.9, 2.6, [
-        P("What happened", size=14, bold=True, color=MAROON, sa=5),
-        P("The run was stopped 33 times (34 starts). On one night 16 starts in a row were stopped after "
-          "1 to 22 minutes, most before finishing a step. No hardware, memory or network errors were "
-          "logged; urgent jobs reclaiming the nodes fits the pattern (UNVERIFIED).", size=13.5, sa=8),
-        P("Decrypto's game runner had no resume. One seed's job was stopped 8 times and replayed from the "
-          "start each time; it finished on its 9th start, in about 7 hours.", size=13.5)],
-        name="what happened")
-    d.text(6.83, 3.62, 5.9, 2.6, [
-        P("What made it finish", size=14, bold=True, color=MAROON, sa=5),
-        P("The scheduler requeued the job after each stop (it was submitted as rerunnable). It saved a "
-          "complete checkpoint every 5 steps (40 saves) and on restart loaded the newest complete one, "
-          "including each GPU's random-number and optimizer state. The final history matched the attempts "
-          "that produced it in all 64,537 logged values.", size=13.5,
-          sa=8),
-        P("Cost: 270 node-hours (1,080 GPU-hours) for 200 steps. The one-game run (3 nodes) used about "
-          "120 node-hours in a single 40.2\u00a0h allocation.", size=13.5)], name="what made it finish")
-    d.therefore(0.6, 6.32, 12.13, 0.58, "Therefore time to result was set by the queue and by restarts, "
-                "not by compute speed; complete, frequent checkpoints decided how much held time was kept.",
-                size=13)
+    # stat tiles
+    tiles = [("34", "starts; 16 stops in a row one night, each after 1–22 min"),
+             ("5 steps", "between complete checkpoints; the scheduler requeued the job"),
+             ("85%", "of held node time went into kept steps (270 node-hours)"),
+             ("8 replays", "Decrypto had no resume: one job restarted from scratch")]
+    tw, gap = (12.13 - 3 * 0.2) / 4, 0.2
+    for i, (val, label) in enumerate(tiles):
+        tx = 0.6 + i * (tw + gap)
+        d.rect(tx, 3.75, tw, 2.2, fill=TINT)
+        d.rect(tx, 3.75, tw, 0.06, fill=MAR if i < 3 else DEC)
+        d.text(tx + 0.2, 3.98, tw - 0.4, 0.7, P(val, size=32, bold=True, color=INK), name=val)
+        d.text(tx + 0.2, 4.75, tw - 0.4, 1.1, P(label, size=13, color=INK2), name=label[:20])
+    d.therefore(0.6, 6.32, 12.13, 0.55, "Therefore time to result was set by the queue and by restarts, "
+                "not by compute speed.", size=13.5)
 
 
 def slide8(d):
     d.slide(notes=NOTES[8])
-    d.frame("INTERPRETATION, LIMITS AND VERDICT",
-            "Models read hints and learned rules quickly; we found little evidence that they model an "
-            "opponent")
-    d.text(0.6, 1.92, 4.3, 3.95, [
-        P("Interpretation", size=13, bold=True, color=MAROON, sa=5),
-        P("**Decrypto.** Misreads were rare (2.5%) and set by the team; interceptions were common (94.7%) "
-          "and set by the opponent. Therefore the gap is in writing hints an informed eavesdropper cannot "
-          "decode, not in being understood by a partner.", size=13, sa=9),
-        P("**MARSHAL.** Forfeits fell first and fastest; the one strategic gain was TicTacToe as second "
-          "mover. Therefore self-play mostly taught the model to stop forfeiting. We hypothesize the late "
-          "breakdown comes from a fragile model or from game engines that ran 26.8 h through 95 in-place "
-          "updates; serving checkpoints 169, 189 and 199 in fresh engines would test it.", size=13)], name="interpretation")
-    lessons = [
-        "Set concurrency from the slowest model's memory: 160 lost games became 0.",
-        "Put every part of a pipeline in one job, so the parts start and stop together.",
-        "Fail the job when traffic leaves the fast network; the fallback is silent.",
-        "Checkpoint completely and often, and requeue automatically: 85% of held node time was kept "
-        "across 34 starts.",
-        "Measure where each step's time goes: generating games took 65%, copying the model 0.2%."]
-    d.text(5.15, 1.92, 4.0, 3.95,
-           [P("What carries to other HPC workloads", size=13, bold=True, color=MAROON, sa=5)] +
-           [P(f"{i}.\t{t}", size=13, sa=7, hang=(0.3, 0.3)) for i, t in enumerate(lessons, 1)],
+    d.frame("INTERPRETATION AND VERDICT",
+            "Partly: models decoded hints and learned rules, but did not reliably anticipate an opponent")
+    d.text(0.6, 1.95, 5.6, 3.7, [
+        P("Can LLMs reason?", size=18, bold=True, color=MAROON, sa=12),
+        P("**Decrypto**  ·  partners understood each other (2.5% misreads), but the opponent cracked 95% "
+          "of codes.", size=17, sa=14),
+        P("**MARSHAL**  ·  self-play fixed illegal moves; strategy improved in one game; Leduc poker did "
+          "not improve.", size=17)], name="answer")
+    lessons = ["Size concurrency to the slowest model's memory",
+               "Put every part of a pipeline in one job",
+               "Fail fast when traffic leaves the fast network",
+               "Checkpoint often; let the scheduler requeue",
+               "Measure the step: games 65%, model copy 0.2%"]
+    d.text(6.73, 1.95, 6.0, 3.7,
+           [P("HPC lessons", size=18, bold=True, color=MAROON, sa=12)] +
+           [P(f"{i}.\t{t}", size=17, sa=11, hang=(0.36, 0.36)) for i, t in enumerate(lessons, 1)],
            name="lessons")
-    limits = [
-        "One base model and one training seed per run; no ablations.",
-        "Paper and human comparison numbers are UNVERIFIED (transcribed, not recomputed).",
-        "Claude ran through its command-line tool at default sampling with a 180 s timeout, not the "
-        "study's settings.",
-        "The three-game run's late windows were chosen after seeing the data."]
-    d.text(9.4, 1.92, 3.33, 3.95,
-           [P("Limits", size=13, bold=True, color=MAROON, sa=5)] +
-           [P(f"•\t{t}", size=13, sa=7, hang=(0.2, 0.2)) for t in limits], name="limits")
-    d.text(0.6, 5.88, 12.13, 1.0, [
-        P("**Verdict: partly.** Current models reason well enough to decode hints and to learn rules from "
-          "play; in our runs they did not reliably anticipate what an opponent can infer. Next, we place "
-          "the self-play-trained model (checkpoint 149) in Decrypto against the same opponents and seeds "
-          "as the untrained model.",
-          size=13.5, color=WHITE)], fill=MAROON, pad=0.14, anchor="m", name="verdict")
+    d.text(0.6, 5.9, 12.13, 0.9, P(
+        "**Next**  ·  play the self-play-trained model (checkpoint 149) in Decrypto against the same "
+        "opponents and seeds as the untrained model.", size=15, color=WHITE), fill=MAROON, pad=0.16,
+        anchor="m", name="verdict")
 
 
 # --------------------------------------------------------------------------- notes
@@ -797,6 +707,7 @@ Every number in the deck is sourced in the notes of the slide where it appears. 
 Question and design. We asked whether large language models reason, and whether training by play changes that. We were geared towards problems that are new on every deal and that the rules alone can score, so we chose games: no human grader and no second model acting as judge.
 Decrypto: Lupu, Willi & Foerster, The Decrypto Benchmark for Multi-Agent Reasoning and Theory of Mind, arXiv:2506.20664 (2025). We used the paper's released competitive configuration (config/paper/figure_3_competitive.yaml) and changed only the roster: Qwen2.5-72B-Instruct, Qwen3-8B, Qwen3-4B and Claude Sonnet 4.6. 4 teams x 4 opponents x 3 seeds x 32 episodes = 1,536 games (jobs 7668935-7668937).
 MARSHAL: Incentivizing Multi-Agent Reasoning via Self-Play with Strategic LLMs, arXiv:2510.15414. R5 trained on TicTacToe alone on 3 nodes (job 7668069); R6 trained on TicTacToe, Kuhn poker and Mini Hanabi on 4 nodes (job 7741511). Both validated every 10 steps on the same 15 conditions, 1,500 trajectories per pass, seed 42.
+Figures: the game diagram is the Decrypto repository's assets/Decrypto Game Diagram.png (Lupu, Willi & Foerster 2025). The MARSHAL loop is our simplification of one training step: rollouts, scoring, advantage computation and policy update, then a weight sync to the inference engines.
 Hardware: 4 x A100-SXM4-40GB per node, confirmed with nvidia-smi in job 7197265 (decrypto/polaris_pbs_notes.md). The MARSHAL upstream configuration assumes one server with 8 x 80 GB GPUs and every role colocated (MARSHAL/polaris_multinode_slingshot.md section 0). Up to 405 Decrypto games ran at once in job 7199012, and a MARSHAL validation pass runs 480 environments.
 """,
 3: """
@@ -805,6 +716,7 @@ In a two-way analysis of variance over the 48 match-up x seed values, the oppone
 Human teams in the paper lasted 6.90 turns and won 4 of 10 games against Llama-3.1-70B (UNVERIFIED).
 Therefore the interceptor's task, matching three new hints to four growing lists of earlier hints, was easy for these models, and teams rarely wrote hints that defeated it.
 Limits: Claude ran through the claude -p command-line tool at its default sampling, with a flattened transcript and a 180 s timeout (73 calls timed out and went through the game's retry path). The example keywords and hints are from the 3-model run log (job 7199012); the code and hint order are illustrative.
+Figure: results/polaris_4model_competitive/figures/fig1_competitive_grids.png, plot area only. Its caption: each square is one match-up, a team (one model writing the clues and the same model reading them, one per row) against one opponent model trying to crack the code (one per column), played 32 times on each of 3 seeds. Left: the share of games the opponent won by cracking the code twice; it is 0.81 or more everywhere. Right: how many turns the games lasted (a team that survives all 8 turns wins). The Qwen3-4B column is lightest on the left and darkest on the right: the weakest code-cracker let teams last longest. Small numbers are the standard error across the 3 seeds.
 Source: decrypto/polaris_4model_competitive_results.md (analysis job 7731552); data in results/polaris_4model_competitive_s{0,1,2}/experiment_summary.csv.
 """,
 4: """
@@ -820,6 +732,7 @@ Sources: decrypto/polaris_scaleup_gpu_needs.md; decrypto/polaris_pbs_notes.md (j
 Design. We ran the authors' released training code on Polaris with two paper-directed changes: 128 games' worth of trajectories from each game per step, and the TicTacToe reward doubled. Settings: Qwen3-4B, temperature 0.6, at most 4,096 tokens per turn, thinking forced, 200 steps. Windows: step 0 (before training), steps 10-50, steps 130-170 (late but healthy; chosen after seeing the data) and steps 180-190 (after the breakdown; also chosen after seeing the data).
 Results. Malformed-move forfeits with the model moving second in TicTacToe and Connect Four fell from 48.8 +/- 2.4% at step 0 to 0.8 +/- 0.5% over steps 10-50. The one-game run (R5) went from 50.5% to 1.8%. Mini Hanabi's team score rose from 1.05 to 2.07 +/- 0.06 (steps 130-170), against 2.17 for the paper's generalist (UNVERIFIED). The Mini Hanabi gain came mainly from fewer over-long turns, not from better move formatting. In TicTacToe as second mover against a search player using 1,000 simulations per move (Monte Carlo tree search), draws among games played to the end rose from 37.8% to 59.6% (+21.8 +/- 7.2 points, p = 0.0027, q = 0.048; analysis/r6/out/conditional_tests.csv). The first seat showed no gain. Leduc poker, never trained, did not improve. At steps 130-170 the three-game run won 23.5 +/- 5.2% of second-seat games against 44.4 +/- 4.4% for the one-game run (difference -20.9 +/- 6.8 points, q = 0.038; r6_vs_r5_rates.csv). At steps 180-190 the gap was 32.6 points. The within-run drop from step 0 (40.2% to 23.5%, -16.7 points, p = 0.014) does not survive the false-discovery correction (q = 0.13; window_tests.csv). Its 40.2% baseline is also the one outlier in the step-0 replicate check: the identical untrained model scored 26.6% in the one-game run's step-0 pass. We therefore show the between-run contrast, not the within-run drop. The paper reports a 28.7% gain on Leduc for its generalist (UNVERIFIED); we did not reproduce it. The 2.17 Mini Hanabi score is the paper's App. J value as transcribed in marshal_r6_results.md Table 1.
 Breakdown: from about step 172, with the learning rate at or below 4.4e-8, the run degraded in every game. Self-play TicTacToe forfeits rose from 3.6% to 43.1%, token entropy from 0.93 to 2.26 nats, the divergence from the base model from 0.18 to 0.69, and forfeits on the 8 held-out conditions (Connect Four x4, Leduc x2, Simple and Full Hanabi; family_rates.csv) from 24.7 +/- 8.8% to 63.8 +/- 15.5%. The 180-190 window was chosen after seeing the breakdown. The weights did not move faster: relative change per 5 steps fell from 3.5e-4 to 2.5e-5. Checkpoint 149 is the last clean model.
+Figures: left is panel c of MARSHAL/analysis/r6/out/fig1_r6_vs_r5_validation.png: the share of validation games forfeited by a malformed or illegal action, with the model moving second, for TicTacToe and Connect Four (held out). R6 is solid with a +/-1 binomial SE band; R5 is dashed, on the same 15 validation conditions and seed. Shaded bands are the compared windows, steps 10-50 and 150-190. The slide's pooled 48.8% -> 0.8% combines the two games shown separately here. Right is panel a of fig2_training_selfplay.png: TicTacToe self-play draws and forfeits during training, 10-step means +/- 1 SE, 64 games per step. R6 forfeits climb after step ~170 while R5's stay flat.
 Source: MARSHAL/marshal_r6_results.md (R1, R2, R5, R6, R7, R8; analysis job outputs in analysis/r6/out/). The Marshall_multinode session fact-checked every MARSHAL line against those files on 2026-11-13, and its corrections are applied.
 """,
 6: """
