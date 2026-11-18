@@ -1,40 +1,17 @@
 # Can LLMs reason? The SC26 talk, slide by slide
 
-A companion to `slides/can_llms_reason_sc26.pptx`. For each slide: what it shows, how to read
-its figure, what the numbers mean, the caveats, and answers to the questions the audience is
-likely to ask. Every number comes from our own result files or job logs, and the source is
-given. Numbers taken from the original papers, or from their human games, are tagged
-UNVERIFIED because we transcribed them rather than recomputed them.
-
-The two projects:
-- **Decrypto** measures reasoning in models as they are, using a word game.
-- **MARSHAL** trains a model by having it play games against itself, then measures what changed.
-
-Both ran on Polaris at the Argonne Leadership Computing Facility.
-
 ---
 
-## Slide 1: Title
+## Slide 2: 
 
-Two projects, one question, one machine. Before presenting, fill in the presenter name and
-department, and check the "SC26" label.
-
----
-
-## Slide 2: We measured reasoning with one game and trained it with others
-
-**The question.** Can language models reason? Here that means three things: planning ahead,
+**The question.** Can language models reason? What we mean by reason can a model trained on other games learn how to play and strategize in a completely different game by planning ahead,
 using information that only some players have, and thinking about what another player knows.
 
-**Why games.**
-- **A fresh problem every deal.** Exam-style questions can leak into a model's training data;
-  a new game can't.
-- **The rules decide the score.** No person, and no second model, has to grade the answer.
-- **They need the skills we care about.** Winning takes planning, hidden information and
-  reading the other player.
+**Games.**
+- **provide a fresh problem every deal** so while rules may leak in results can't leak into the training data.
+- **The models need to learn how to win and just memorize patterns.** 
 
-**Decrypto (left).** The diagram is from the original Decrypto paper (Lupu, Willi & Foerster,
-2025).
+**Decrypto (left).** The diagram is from the original Decrypto paper 
 1. Alice, the **encoder**, sees four secret keywords and a 3-digit code, for example 2-3-4. She
    writes one hint per digit.
 2. Bob, the **decoder**, knows the keywords and tries to read the code back.
@@ -47,13 +24,13 @@ a team against each of the 4 as opponent: 3 seeds × 32 games per pairing, 1,536
 training.
 
 **MARSHAL (right).** One training step is a loop:
-1. **Play:** the model plays both seats of a game, thinking in text before each move.
+1. **Play:** the model we use is the Qwen3-4B plays, It trained for 200 steps on TicTacToe, Kuhn
+poker and Mini Hanabi (a cooperative card game) both sides of a game, thinking in text before each move.
 2. **Score:** the game engine judges the result.
 3. **Learn:** the model is shifted toward the moves that preceded wins.
 4. **Copy:** the updated model is sent to the players.
 
-The model is Qwen3-4B, a 4-billion-parameter model. It trained for 200 steps on TicTacToe, Kuhn
-poker and Mini Hanabi (a cooperative card game). It was tested on games it never trained on:
+. It was tested on games it never trained on:
 Connect Four, Leduc poker, and Simple and Full Hanabi. There were two runs: R6 trained on all
 three games (4 nodes), and R5 on TicTacToe alone (3 nodes).
 
@@ -62,22 +39,7 @@ three games (4 nodes), and R5 on TicTacToe alone (3 nodes).
   hard test of that claim: it's played with words, it mixes cooperation and competition, and
   winning means anticipating what the opponent can infer. MARSHAL never saw it.
 - **The experiment.** Put the trained models in Decrypto in place of the untrained Qwen3-4B,
-  against the same opponents on the same seeds, so any difference comes from training. The
-  two checkpoints are R6 checkpoint 149, the last one before that run broke down, and R5
-  checkpoint 199. They were submitted on 2026-11-18 as jobs 7860393 and 7860394, and are still
-  queued; see slide 8.
-- **Machine.** Decrypto's job scripts reuse Polaris lessons MARSHAL learned first:
-  - copy the Python environment to each node's local disk as one file, because importing it
-    from the shared filesystem could take about 19 minutes;
-  - compute nodes are offline, so every model is downloaded in advance;
-  - each job is capped at 4,096 processes;
-  - pin package versions known to work;
-  - stop loading the system conda module (September 2026).
-
-  The web-proxy hang between nodes was Decrypto's own finding (job 7186962), not MARSHAL's.
-
-**The Polaris strip.** Each node has 4 NVIDIA A100 GPUs with 40 GB each. Our jobs used 3 to 4
-nodes.
+  against the same opponents on the same seeds, so any difference comes from training. 
 
 ---
 
@@ -155,8 +117,7 @@ models onto one node would free a node; we didn't need to.
   34 of each GPU's 40 GiB.
 - What's left holds 18,800 tokens of conversation, about 2.3 full-length requests of 8,192
   tokens at once.
-- It loaded on the third configuration we tried. Jobs 7197372 and 7197374 had no memory left
-  for conversations; job 7197375 worked.
+
 
 **The bars** (from the earlier 3-model run, 405 games).
 - **All 405 games at once:** the 72B server dropped 610 of 1,929 requests (32%), and 160 games
@@ -172,19 +133,12 @@ models onto one node would free a node; we didn't need to.
 - **Separate jobs failed.** The servers started hours before the game job (a skew of 3.4–7 h)
   and ran out their time limits idle.
 - **One fused job works.** A single job holding all four nodes starts and stops them together.
-- **Shorter requests start sooner.** A 16-hour request waited 32 h with no start time; a
-  10-hour request started 2.5 h after submission.
+-
 
-**A network detail, if someone asks.** Node 0 needed direct traffic to the model servers and
-proxied traffic to Claude, both at once. The HTTP library ignored address ranges in the proxy
-exception list, and each node name has two network addresses. So requests went to the proxy
-and the servers never answered (jobs 7599882 and 7668624). The fix was to list each server's
-exact registered address, and to fail the job at once if any request would still go through the
-proxy (job 7668797).
+
 
 **Cost.** The 405-game run used about 10 node-hours.
 
-Sources: `polaris_scaleup_gpu_needs.md`; the job ledger in `polaris_pbs_notes.md`.
 
 ---
 
@@ -206,7 +160,7 @@ Sources: `polaris_scaleup_gpu_needs.md`; the job ledger in `polaris_pbs_notes.md
 **What training did, and didn't do.**
 - **It stopped the model forfeiting:** legal moves, and reasoning short enough to finish within
   the 4,096-token turn limit.
-- **One strategic gain:** in TicTacToe as the second mover, against a search player using 1,000
+- **One strategic gain:** in TicTacToe fewer losses when moving second in TicTacToe where draws are the best possible result, against a search player using 1,000
   simulations per move, draws among games played to the end rose from 37.8% to 59.6%
   (q = 0.048, after correcting for many comparisons). The first seat showed no gain.
 - **Mini Hanabi:** the team score rose from 1.05 at step 0 to 2.07 ± 0.06 at steps 130–170;
@@ -226,9 +180,6 @@ almost zero.
 
 **If someone asks: did it learn to reason?** Mostly it learned to *answer*: correctly formatted
 moves, within the length limit. Better strategy showed up in one game and one seat.
-
-Source: `MARSHAL/marshal_r6_results.md`, sections R1–R8. The MARSHAL session fact-checked these
-claims on 2026-11-13.
 
 ---
 
