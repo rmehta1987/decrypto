@@ -112,7 +112,7 @@ the slides, "the opponent cracked the code" means the same thing.
   Llama-3.1-70B, lasted 6.90 rounds (UNVERIFIED).
 
 **Why the opponent usually wins.** In round 1 the opponent is guessing among 24 possible codes,
-and in round 1 it cracked 3.6% of codes, close to the 1 in 24 (4.2%) of a blind guess. After
+and it cracked 3.6% of them, close to the 1 in 24 (4.2%) of a blind guess. After
 that it has a growing list of earlier hints for each keyword. Its per-round success rose to
 44.0% in round 2 and peaked at 68.9% in round 4. To stop it, the encoder has to write hints its
 partner will get but that don't fit the visible pattern. That means thinking about what the
